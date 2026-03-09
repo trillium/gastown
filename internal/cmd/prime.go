@@ -147,6 +147,16 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 		return nil
 	}
 
+	// Compact/resume: fast path that skips setupPrimeSession and the
+	// retry-heavy findAgentWork. The agent already has role context and
+	// work state in compressed memory — just confirm identity and inject
+	// any new mail. This keeps PreCompress hooks under 1s for non-Claude
+	// runtimes that have short hook timeouts (Gemini CLI).
+	if isCompactResume() {
+		runPrimeCompactResume(ctx, cwd)
+		return nil
+	}
+
 	if err := setupPrimeSession(ctx, roleInfo); err != nil {
 		return err
 	}
@@ -157,14 +167,6 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 	// the correct work attribution until the next gt prime overwrites it.
 	hookedBead := findAgentWork(ctx)
 	injectWorkContext(ctx, hookedBead)
-
-	// Compact/resume: lighter prime that skips verbose role context.
-	// The agent already has role docs in compressed memory — just restore
-	// identity, hook status, and any new mail.
-	if isCompactResume() {
-		runPrimeCompactResume(ctx, cwd, hookedBead)
-		return nil
-	}
 
 	formula, err := outputRoleContext(ctx)
 	if err != nil {
@@ -196,15 +198,14 @@ func runPrime(cmd *cobra.Command, args []string) (retErr error) {
 
 // runPrimeCompactResume runs a lighter prime after compaction or resume.
 // The agent already has full role context in compressed memory. This just
-// restores identity, checks hook/work status, and injects any new mail.
+// restores identity and injects any new mail. It deliberately skips
+// setupPrimeSession and findAgentWork (which hit Dolt) to stay fast
+// enough for non-Claude runtimes with short hook timeouts.
 //
-// Unlike the full prime path, this uses a continuation directive instead of
+// Unlike the full prime path, this outputs a brief recovery line instead of
 // the full AUTONOMOUS WORK MODE block. This prevents agents from re-announcing
 // and re-initializing after compaction. (GH#1965)
-//
-// hookedBead is pre-fetched by the caller (runPrime) to avoid a redundant
-// findAgentWork call and ensure work context is injected before this runs.
-func runPrimeCompactResume(ctx RoleContext, cwd string, hookedBead *beads.Issue) {
+func runPrimeCompactResume(ctx RoleContext, cwd string) {
 	// Brief identity confirmation
 	actor := getAgentIdentity(ctx)
 	source := primeHookSource
@@ -217,26 +218,9 @@ func runPrimeCompactResume(ctx RoleContext, cwd string, hookedBead *beads.Issue)
 	// Session metadata for seance
 	outputSessionMetadata(ctx)
 
-	// Output continuation directive (not full autonomous startup).
-	// The agent already knows what it was doing — just remind it of the hook.
-	if hookedBead != nil {
-		attachment := beads.ParseAttachmentFields(hookedBead)
-		hasMolecule := attachment != nil && attachment.AttachedMolecule != ""
-		outputContinuationDirective(hookedBead, hasMolecule)
-	}
-
-	// Molecule progress if available
-	outputMoleculeContext(ctx)
-
-	// Inject any mail that arrived during compaction
-	if !primeDryRun {
-		runMailCheckInject(cwd)
-	}
-
-	// Startup directive only if no hooked work
-	if hookedBead == nil {
-		outputStartupDirective(ctx)
-	}
+	fmt.Println("\n---")
+	fmt.Println()
+	fmt.Println("**Continue your current task.** If you've lost context, run `gt prime` for full reload.")
 }
 
 // validatePrimeFlags checks that CLI flag combinations are valid.
