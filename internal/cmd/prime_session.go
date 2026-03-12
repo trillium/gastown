@@ -255,10 +255,6 @@ func outputSessionMetadata(ctx RoleContext) {
 	sessionID := resolveSessionIDForPrime(actor)
 
 	// Output structured metadata line
-	if primeStructuredSessionStartOutput {
-		fmt.Println(formatSessionMetadataLine(actor, sessionID))
-		return
-	}
 	fmt.Println(formatSessionMetadataLine(actor, sessionID))
 }
 

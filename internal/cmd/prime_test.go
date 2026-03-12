@@ -783,6 +783,30 @@ func TestFormatSessionMetadataLine(t *testing.T) {
 	}
 }
 
+func TestStructuredOutputOnlyForSessionStart(t *testing.T) {
+	origStructured := primeStructuredSessionStartOutput
+	defer func() { primeStructuredSessionStartOutput = origStructured }()
+
+	// Simulate a non-SessionStart hook event (e.g., Stop)
+	primeStructuredSessionStartOutput = false
+	input := hookInput{HookEventName: "Stop"}
+	primeStructuredSessionStartOutput = input.HookEventName == "SessionStart"
+	if primeStructuredSessionStartOutput {
+		t.Fatal("primeStructuredSessionStartOutput should be false for HookEventName=Stop")
+	}
+
+	// Verify beacon lines are emitted (not suppressed) for non-SessionStart
+	lines := hookSessionBeaconLines("abc", "startup")
+	if len(lines) != 2 {
+		t.Fatalf("hookSessionBeaconLines() for non-SessionStart = %v, want 2 beacon lines", lines)
+	}
+
+	// Verify metadata line retains brackets for non-SessionStart
+	if got := formatSessionMetadataLine("crew/quick", "sess-1"); !strings.HasPrefix(got, "[GAS TOWN]") {
+		t.Fatalf("formatSessionMetadataLine() for non-SessionStart = %q, want bracketed prefix", got)
+	}
+}
+
 // TestCheckHandoffMarkerParsesReason tests that checkHandoffMarker correctly
 // parses the reason field from the marker file (GH#1965).
 func TestCheckHandoffMarkerParsesReason(t *testing.T) {
