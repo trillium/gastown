@@ -384,7 +384,7 @@ func runHubStatus(cmd *cobra.Command, args []string) error {
 		if owner == hostname {
 			owner += " (this machine)"
 		}
-		fmt.Printf("%s Hub claimed by: %s\n", style.Bold.Render("🔒"), owner)
+		fmt.Printf("%s Hub claimed by: %s\n", style.Bold.Render("●"), owner)
 		fmt.Printf("  Claimed at: %s\n", lock.ClaimedAt.Format(time.RFC3339))
 	}
 
