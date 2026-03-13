@@ -140,7 +140,7 @@ func subForLog(argv []string) string {
 }
 
 // extractIdentity parses the client cert CN "gt-<rig>-<name>" into "<rig>/<name>".
-// Uses LastIndex to correctly handle hyphenated rig names (e.g. "gas-town").
+// Rig names are always single words; polecat names may contain hyphens.
 func extractIdentity(r *http.Request) string {
 	if r.TLS == nil || len(r.TLS.PeerCertificates) == 0 {
 		return ""
@@ -150,24 +150,28 @@ func extractIdentity(r *http.Request) string {
 }
 
 // polecatName extracts the polecat name from a CN of the form "gt-<rig>-<name>".
-// The last "-" is the rig/name separator, so hyphenated rig names are handled correctly.
+// Rig names are always single words (no hyphens); polecat names may contain hyphens.
+// The first "-" in the post-"gt-" remainder is the rig/name separator.
 // Returns "" if the CN does not match the expected format, or if rig or name is empty.
 func polecatName(cn string) string {
 	if !strings.HasPrefix(cn, "gt-") {
 		return ""
 	}
 	rest := cn[3:] // strip "gt-"
-	idx := strings.LastIndex(rest, "-")
+	idx := strings.Index(rest, "-")
 	// idx <= 0: idx < 0 means no separator; idx == 0 means rig is empty.
 	if idx <= 0 {
 		return ""
 	}
-	return rest[idx+1:]
+	name := rest[idx+1:]
+	if name == "" {
+		return ""
+	}
+	return name
 }
 
 // cnToIdentity converts a CN of the form "gt-<rig>-<name>" to "<rig>/<name>".
-// The last "-" is treated as the rig/name separator, so hyphenated rig names
-// (e.g. "gas-town") are handled correctly.
+// Rig names are always single words; the first "-" after "gt-" marks the rig boundary.
 func cnToIdentity(cn string) string {
 	name := polecatName(cn)
 	if name == "" {

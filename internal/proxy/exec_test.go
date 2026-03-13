@@ -114,12 +114,12 @@ func TestPolecatName(t *testing.T) {
 		want string
 	}{
 		{"gt-gastown-furiosa", "furiosa"},
-		{"gt-gas-town-furiosa", "furiosa"}, // hyphenated rig
-		{"gt-gastown-", ""},                // empty name
-		{"gt--furiosa", ""},                 // empty rig; rejected
-		{"noprefix-rig-name", ""},          // missing gt- prefix
-		{"gt-nodashinrest", ""},            // only one component after stripping gt-
-		{"", ""},                           // empty string
+		{"gt-gastown-smoke-test", "smoke-test"}, // multi-hyphen polecat name
+		{"gt-gastown-", ""},                     // empty name
+		{"gt--furiosa", ""},                     // empty rig; rejected
+		{"noprefix-rig-name", ""},               // missing gt- prefix
+		{"gt-nodashinrest", ""},                 // only one component after stripping gt-
+		{"", ""},                                // empty string
 	}
 	for _, tc := range cases {
 		tc := tc
@@ -136,12 +136,12 @@ func TestCnToIdentity(t *testing.T) {
 		want string
 	}{
 		{"gt-gastown-furiosa", "gastown/furiosa"},
-		{"gt-gas-town-furiosa", "gas-town/furiosa"}, // hyphenated rig
-		{"gt-gastown-", ""},                          // empty name
-		{"gt--furiosa", ""},                          // empty rig (two consecutive dashes after gt-)
-		{"noprefix-rig-name", ""},                    // missing gt- prefix
-		{"gt-nodashinrest", ""},                      // only one component after stripping gt-
-		{"", ""},                                     // empty string
+		{"gt-gastown-smoke-test", "gastown/smoke-test"}, // multi-hyphen polecat name
+		{"gt-gastown-", ""},                             // empty name
+		{"gt--furiosa", ""},                             // empty rig (two consecutive dashes after gt-)
+		{"noprefix-rig-name", ""},                       // missing gt- prefix
+		{"gt-nodashinrest", ""},                         // only one component after stripping gt-
+		{"", ""},                                        // empty string
 	}
 	for _, tc := range cases {
 		tc := tc
