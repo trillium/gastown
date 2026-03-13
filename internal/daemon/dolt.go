@@ -816,6 +816,14 @@ func (m *DoltServerManager) startLocked() error {
 	cmd.Stdout = logFile
 	cmd.Stderr = logFile
 
+	// Ensure DOLT_REMOTE_PASSWORD is set in the server's environment so that
+	// CLI commands (push/pull/fetch) that delegate to the running server can
+	// authenticate against remote servers. Without this, dolt push --user
+	// fails because LookupEnv runs in the server process, not the CLI process.
+	if _, ok := os.LookupEnv("DOLT_REMOTE_PASSWORD"); !ok {
+		cmd.Env = append(os.Environ(), "DOLT_REMOTE_PASSWORD=")
+	}
+
 	// Detach from this process group so it survives daemon restart
 	setSysProcAttr(cmd)
 
