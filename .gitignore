@@ -73,3 +73,8 @@ result
 
 # Gas Town (added by gt)
 __pycache__/
+
+# Dolt runtime files (leaked by worktree bd init)
+/dolt-server.*
+/dolt/
+/config.yaml
