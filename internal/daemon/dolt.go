@@ -787,12 +787,21 @@ func (m *DoltServerManager) startLocked() error {
 		return fmt.Errorf("dolt not found in PATH: %w", err)
 	}
 
+	// Write a managed config.yaml and start with --config for full feature support
+	// (remotesapi, timeouts, etc.) instead of CLI flags.
+	configPath := filepath.Join(m.config.DataDir, "config.yaml")
+	serverConfig := doltserver.DefaultConfig(m.townRoot)
+	serverConfig.Host = m.config.Host
+	serverConfig.Port = m.config.Port
+	serverConfig.DataDir = m.config.DataDir
+	if err := doltserver.WriteServerConfig(serverConfig, configPath); err != nil {
+		return fmt.Errorf("writing Dolt config: %w", err)
+	}
+
 	// Build command arguments
 	args := []string{
 		"sql-server",
-		"--host", m.config.Host,
-		"--port", strconv.Itoa(m.config.Port),
-		"--data-dir", m.config.DataDir,
+		"--config", configPath,
 	}
 
 	// Open log file

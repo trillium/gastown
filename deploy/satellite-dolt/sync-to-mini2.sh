@@ -7,6 +7,9 @@
 
 set -euo pipefail
 
+# Ensure Homebrew and common bin paths are available (needed when run from cron)
+export PATH="/opt/homebrew/bin:/usr/local/bin:$PATH"
+
 MINI2_HOST="100.111.197.110"
 MINI2_PORT="8000"
 CONTAINER="dolt-satellite"

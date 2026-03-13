@@ -233,6 +233,11 @@ type Config struct {
 	// Default is "warning" to suppress connection open/close noise. Override with
 	// GT_DOLT_LOGLEVEL=info (or debug) for diagnostics.
 	LogLevel string
+
+	// RemotesAPIPort is the port for Dolt's remotesapi (HTTP endpoint for push/pull).
+	// Set to 0 to disable. Default is 8000 to enable federation between machines.
+	// Override with GT_DOLT_REMOTESAPI_PORT.
+	RemotesAPIPort int
 }
 
 // DefaultConfig returns the default Dolt server configuration.
@@ -250,6 +255,7 @@ type Config struct {
 //   - GT_DOLT_USER → User
 //   - GT_DOLT_PASSWORD → Password
 //   - GT_DOLT_LOGLEVEL → LogLevel (trace, debug, info, warning, error, fatal)
+//   - GT_DOLT_REMOTESAPI_PORT → RemotesAPIPort (0 to disable)
 func DefaultConfig(townRoot string) *Config {
 	daemonDir := filepath.Join(townRoot, "daemon")
 	config := &Config{
@@ -263,6 +269,7 @@ func DefaultConfig(townRoot string) *Config {
 		ReadTimeoutMs:  DefaultReadTimeoutMs,
 		WriteTimeoutMs: DefaultWriteTimeoutMs,
 		LogLevel:       "warning",
+		RemotesAPIPort: 8000,
 	}
 
 	if h := os.Getenv("GT_DOLT_HOST"); h != "" {
@@ -287,6 +294,11 @@ func DefaultConfig(townRoot string) *Config {
 	}
 	if ll := os.Getenv("GT_DOLT_LOGLEVEL"); ll != "" {
 		config.LogLevel = ll
+	}
+	if rp := os.Getenv("GT_DOLT_REMOTESAPI_PORT"); rp != "" {
+		if port, err := strconv.Atoi(rp); err == nil {
+			config.RemotesAPIPort = port
+		}
 	}
 
 	// Fallback: if GT_DOLT_PORT is not in the shell env, read it from
@@ -1001,11 +1013,11 @@ func checkPortAvailable(port int) error {
 	return nil
 }
 
-// writeServerConfig writes a managed Dolt config.yaml from the Config struct.
+// WriteServerConfig writes a managed Dolt config.yaml from the Config struct.
 // This ensures all required settings (especially connection timeouts) are always
 // present when the server starts. The file is overwritten on each start to prevent
 // configuration drift.
-func writeServerConfig(config *Config, configPath string) error {
+func WriteServerConfig(config *Config, configPath string) error {
 	// Build the listener host entry. Omit it when empty to use Dolt's default
 	// (binds to all interfaces), which is the backward-compatible behavior.
 	hostLine := ""
@@ -1028,10 +1040,20 @@ func writeServerConfig(config *Config, configPath string) error {
 		maxConnLine = fmt.Sprintf("\n  max_connections: %d", config.MaxConnections)
 	}
 
+	remotesAPISection := ""
+	if config.RemotesAPIPort > 0 {
+		remotesAPISection = fmt.Sprintf(`
+remotesapi:
+  port: %d
+  read_only: false
+`, config.RemotesAPIPort)
+	}
+
 	content := fmt.Sprintf(`# Dolt SQL server configuration — managed by Gas Town (gt dolt start)
 # Do not edit manually; changes are overwritten on each server start.
 # To customize, set Gas Town environment variables:
 #   GT_DOLT_PORT, GT_DOLT_HOST, GT_DOLT_USER, GT_DOLT_PASSWORD, GT_DOLT_LOGLEVEL
+#   GT_DOLT_REMOTESAPI_PORT (0 to disable, default 8000)
 
 log_level: %s
 
@@ -1045,7 +1067,7 @@ behavior:
   auto_gc_behavior:
     enable: true
     archive_level: 1
-`,
+%s`,
 		config.LogLevel,
 		config.Port,
 		hostLine,
@@ -1053,6 +1075,7 @@ behavior:
 		readTimeoutLine,
 		writeTimeoutLine,
 		config.DataDir,
+		remotesAPISection,
 	)
 
 	return os.WriteFile(configPath, []byte(content), 0600)
@@ -1224,7 +1247,7 @@ func Start(townRoot string) error {
 	// The config file uses --config so all settings come from this file; CLI flags
 	// are ignored by dolt when --config is used.
 	configPath := filepath.Join(config.DataDir, "config.yaml")
-	if err := writeServerConfig(config, configPath); err != nil {
+	if err := WriteServerConfig(config, configPath); err != nil {
 		logFile.Close()
 		return fmt.Errorf("writing Dolt config: %w", err)
 	}
