@@ -98,46 +98,61 @@ Host machine
 └─────────────────────────────────────────────────────┘
 ```
 
-### 3.3 Target: daytona (remote cloud container)
+### 3.3 Target: Docker (remote container on Mac Mini)
 
-The agent runs in a remote Linux container. All communication — control-plane,
-git fetch, and git push — goes through the host's mTLS proxy. The container has
-**zero outbound internet access**.
+> **2026-03-13 update:** Daytona v0.150.0 became cloud SaaS and no longer accepts
+> custom git URLs. Replaced by plain Docker. S3 smoke test confirmed Docker works
+> end-to-end. All architecture below reflects Docker; Daytona references elsewhere
+> in this doc are historical.
+
+The agent runs in a Docker container on a Mac Mini on the local network. The
+Mac Mini is the Docker host; the dev Mac runs Gas Town (coordinator). All
+communication — control-plane, git fetch, and git push — goes through the dev
+Mac's mTLS proxy over the local network. The container has **zero outbound
+internet access**.
 
 ```
-Host machine                      Daytona cloud container
-┌───────────────────────────┐     ┌──────────────────────────────────────┐
-│                           │     │                                      │
-│  GasTown daemon           │     │  tmux pane: daytona exec <ws>        │
-│  ┌──────────────────────┐ │     │  ┌────────────────────────────────┐  │
-│  │ SessionManager       │ │     │  │ claude --mode=direct           │  │
-│  │  - issues cert       │ │     │  │                                │  │
-│  │  - injects env vars  │ │     │  │  gt prime / gt done / bd show  │  │
-│  │  - starts proxy      │ │     │  │  ↓ (proxy-client detects env)  │  │
-│  └──────────────────────┘ │     │  │  POST /v1/exec over mTLS       │  │
-│                           │     │  └───────────────┬────────────────┘  │
-│  gt-proxy-server          │     │                  │ mTLS (cert CN     │
-│  ┌──────────────────────┐ │◄────┼──────────────────┘  gt-rig-name)     │
-│  │ /v1/exec             │ │     │                                      │
-│  │  - validates cert CN │ │     │  git fetch / git push origin         │
-│  │  - injects --identity│ │     │  (origin = proxy git endpoint)       │
-│  │  - runs gt/bd on host│ │     │  ↓                                   │
-│  │                      │ │◄────┼──── git smart HTTP over mTLS ────────┘
-│  │ /v1/git/<rig>/       │ │     │
-│  │  upload-pack (fetch) │ │     │  Container git remote:
-│  │  receive-pack (push) │ │     │    origin = https://host:9876/v1/git/<rig>
-│  │  ↕ .repo.git on host │ │     │
-│  └──────────────────────┘ │     The container needs:
-│         │                 │     - gt-proxy-client binary (as gt + bd)
-│         │ daemon pushes   │     - GT_PROXY_URL, GT_PROXY_CERT, GT_PROXY_KEY
-│         ▼ to GitHub       │     - GIT_SSL_CERT, GIT_SSL_KEY, GIT_SSL_CAINFO
-│  GitHub  ◄───────────     │     (all injected at session spawn)
-│  (upstream, host-only)    │
-└───────────────────────────┘
+Dev Mac (Gas Town coordinator)         Mac Mini (Docker host)
+┌───────────────────────────┐          ┌──────────────────────────────────────┐
+│                           │          │                                      │
+│  GasTown daemon           │          │  tmux pane (on dev Mac):             │
+│  ┌──────────────────────┐ │          │    docker -H tcp://mini:2376 \        │
+│  │ SessionManager       │ │          │      exec -it <cid> claude           │
+│  │  - issues cert       │ │          │                                      │
+│  │  - runs docker -H    │ │          │  ┌────────────────────────────────┐  │
+│  │    tcp://mini:2376   │ │          │  │ claude --mode=direct           │  │
+│  │    run (provision)   │ │          │  │                                │  │
+│  │  - injects env vars  │ │          │  │  gt prime / gt done / bd show  │  │
+│  └──────────────────────┘ │          │  │  ↓ (proxy-client detects env)  │  │
+│                           │          │  │  POST /v1/exec over mTLS       │  │
+│  gt-proxy-server          │          │  └───────────────┬────────────────┘  │
+│  (listens 0.0.0.0:9876)  │◄─────────┼──────────────────┘  mTLS             │
+│  ┌──────────────────────┐ │          │                                      │
+│  │ /v1/exec             │ │          │  git fetch / git push origin         │
+│  │  - validates cert CN │ │          │  (origin = proxy git endpoint)       │
+│  │  - injects --identity│ │          │  ↓                                   │
+│  │  - runs gt/bd locally│ │◄─────────┼──── git smart HTTP over mTLS ────────┘
+│  │                      │ │          │
+│  │ /v1/git/<rig>/       │ │          │  Container git remote:
+│  │  upload-pack (fetch) │ │          │    origin = https://dev-mac-ip:9876/v1/git/<rig>
+│  │  receive-pack (push) │ │          │
+│  │  ↕ .repo.git locally │ │          │  Container env vars (injected at spawn):
+│  └──────────────────────┘ │          │  - GT_PROXY_URL=https://dev-mac-ip:9876
+│         │                 │          │  - GT_PROXY_CERT, GT_PROXY_KEY
+│         │ daemon pushes   │          │  - GIT_SSL_CERT, GIT_SSL_KEY, GIT_SSL_CAINFO
+│         ▼ to GitHub       │          │
+│  GitHub  ◄───────────     │          │  Container image (~19MB):
+│  (upstream, host-only)    │          │  ubuntu:24.04 + git + ca-certs + gt-proxy-client
+└───────────────────────────┘          └──────────────────────────────────────┘
 ```
+
+**Docker host access:** `DOCKER_HOST=ssh://user@mini-ip` (SSH, preferred — no
+daemon config needed) or `tcp://mini-ip:2376` (TLS-secured TCP). The SSH option
+requires no daemon changes on the Mini; the `docker -H ssh://...` prefix routes
+all docker commands over SSH.
 
 The container never contacts GitHub. All git traffic flows:
-**container ↔ proxy ↔ `.repo.git`**. The host daemon pushes to GitHub asynchronously.
+**container ↔ mTLS proxy (dev Mac) ↔ `.repo.git`**. The host daemon pushes to GitHub asynchronously.
 
 ---
 
@@ -392,15 +407,35 @@ Alternatively, GasTown can distribute a pre-built Docker image
 (`ghcr.io/steveyegge/gastown-polecat:latest`) and reference it directly,
 bypassing the setup script. This is more reliable for production use.
 
-The `DaytonaConfig` struct:
+The `DockerConfig` struct (replaces `DaytonaConfig`):
 
 ```go
-type DaytonaConfig struct {
-    WorkspaceID string `json:"workspace_id"`
-    Profile     string `json:"profile,omitempty"`     // devcontainer name
-    Image       string `json:"image,omitempty"`       // override image directly
-    AutoStop    bool   `json:"auto_stop,omitempty"`   // stop workspace after session ends
-    AutoDelete  bool   `json:"auto_delete,omitempty"` // delete workspace after session ends
+type DockerConfig struct {
+    // DockerHost is the Docker daemon endpoint for the remote Mac Mini.
+    // Use "ssh://user@mini-ip" (preferred) or "tcp://mini-ip:2376".
+    // Defaults to local Docker daemon if empty.
+    DockerHost string `json:"docker_host,omitempty"`
+
+    // Image is the container image to run. Defaults to gastown-polecat:latest.
+    Image string `json:"image,omitempty"`
+
+    // ExtraHosts are additional /etc/hosts entries injected via --add-host.
+    // Required for Docker Desktop on macOS: ["host.docker.internal:host-gateway"]
+    ExtraHosts []string `json:"extra_hosts,omitempty"`
+
+    // AutoRemove removes the container on exit (docker run --rm).
+    AutoRemove bool `json:"auto_remove,omitempty"`
+}
+```
+
+Configured per-rig in `settings/config.json`:
+```json
+{
+  "docker": {
+    "docker_host": "ssh://trillium@mini-ip",
+    "image": "ghcr.io/steveyegge/gastown-polecat:latest",
+    "auto_remove": true
+  }
 }
 ```
 
