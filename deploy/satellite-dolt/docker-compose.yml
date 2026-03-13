@@ -1,0 +1,29 @@
+# Satellite Dolt server for Gas Town federation
+# Deploy on any machine to join the federation network.
+#
+# Usage:
+#   docker compose up -d
+#
+# The server exposes:
+#   - SQL on port 3307 (MySQL protocol)
+#   - Remotesapi on port 8000 (Dolt push/pull)
+#
+# Data persists in the dolt-data volume.
+# Config is mounted from ./config.yaml.
+
+services:
+  dolt:
+    image: dolthub/dolt-sql-server:latest
+    container_name: dolt-satellite
+    restart: unless-stopped
+    ports:
+      - "3307:3307"
+      - "8000:8000"
+    volumes:
+      - dolt-data:/var/lib/dolt
+      - ./config.yaml:/etc/dolt/servercfg.d/config.yaml:ro
+    environment:
+      DOLT_ROOT_PATH: /var/lib/dolt
+
+volumes:
+  dolt-data:
