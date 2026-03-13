@@ -83,6 +83,16 @@ to decide where work happens. A quick question saves context waste.
 - The human explicitly says "sling this" or "do this yourself"
 - You're already in an established mode for the current conversation
 
+### Model Selection
+
+Action mayor should run on the strongest model (opus). Orchestration mayor
+runs fine on sonnet. When the human chooses action mode, remind them:
+
+> "You may want to `/model opus` for action mode if you're not already on it."
+
+Don't nag — mention it once when entering action mode. If they're already on
+opus or don't switch, proceed anyway.
+
 ### Fix-Merging Community PRs
 
 When you fix-merge a community PR (fix it up and commit directly to main), **always
