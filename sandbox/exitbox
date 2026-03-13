@@ -1,0 +1,84 @@
+#!/bin/bash
+#
+# exitbox — local process sandbox wrapper for Gas Town polecats
+#
+# Wraps macOS sandbox-exec with named profiles. Provides the interface:
+#   exitbox run --profile=<name> -- <command> [args...]
+#
+# Environment variables:
+#   GT_WORKTREE_PATH — polecat's worktree directory (default: $PWD)
+#   GT_HOME          — Gas Town root directory (default: ~/gt)
+#
+# Profiles are SBPL files stored in sandbox/profiles/ relative to this script.
+#
+
+set -euo pipefail
+
+SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
+PROFILES_DIR="${EXITBOX_PROFILES_DIR:-$SCRIPT_DIR/profiles}"
+
+usage() {
+    echo "Usage: exitbox run --profile=<name> -- <command> [args...]" >&2
+    echo "" >&2
+    echo "Available profiles:" >&2
+    for f in "$PROFILES_DIR"/*.sb; do
+        [ -f "$f" ] && echo "  $(basename "$f" .sb)" >&2
+    done
+    exit 1
+}
+
+# --- Parse arguments ---
+
+if [[ $# -lt 1 || "${1}" != "run" ]]; then
+    usage
+fi
+shift
+
+PROFILE=""
+while [[ $# -gt 0 ]]; do
+    case "$1" in
+        --profile=*)
+            PROFILE="${1#--profile=}"
+            shift
+            ;;
+        --)
+            shift
+            break
+            ;;
+        *)
+            echo "Error: unknown option: $1" >&2
+            usage
+            ;;
+    esac
+done
+
+if [[ -z "$PROFILE" ]]; then
+    echo "Error: --profile is required" >&2
+    usage
+fi
+
+if [[ $# -eq 0 ]]; then
+    echo "Error: no command specified after --" >&2
+    usage
+fi
+
+PROFILE_FILE="$PROFILES_DIR/$PROFILE.sb"
+if [[ ! -f "$PROFILE_FILE" ]]; then
+    echo "Error: profile not found: $PROFILE_FILE" >&2
+    echo "Available: $(ls "$PROFILES_DIR"/*.sb 2>/dev/null | xargs -I{} basename {} .sb | tr '\n' ' ')" >&2
+    exit 1
+fi
+
+# --- Resolve parameters ---
+
+WORKTREE_PATH="${GT_WORKTREE_PATH:-$PWD}"
+GT_HOME="${GT_HOME:-$HOME/gt}"
+USER_HOME="${HOME}"
+
+# --- Execute sandboxed ---
+
+exec /usr/bin/sandbox-exec -f "$PROFILE_FILE" \
+    -D "WORKTREE_PATH=$WORKTREE_PATH" \
+    -D "GT_HOME=$GT_HOME" \
+    -D "USER_HOME=$USER_HOME" \
+    "$@"

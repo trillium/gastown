@@ -1,0 +1,184 @@
+;;
+;; gastown-polecat.sb — macOS sandbox-exec profile for Gas Town polecats
+;;
+;; Restricts a polecat's Claude Code session to:
+;;   Filesystem:  rw worktree + ~/.claude, ro system/shared dirs
+;;   Network:     loopback (Dolt :3307) + HTTPS (Anthropic API)
+;;   Denied:      ~/.ssh, arbitrary writes, non-HTTPS outbound, raw sockets
+;;
+;; Parameters (set via sandbox-exec -D):
+;;   WORKTREE_PATH — polecat's git worktree directory (read/write)
+;;   GT_HOME       — Gas Town root, typically ~/gt
+;;   USER_HOME     — user's home directory
+;;
+;; Usage:
+;;   sandbox-exec -f gastown-polecat.sb \
+;;     -D WORKTREE_PATH=/path/to/worktree \
+;;     -D GT_HOME=$HOME/gt \
+;;     -D USER_HOME=$HOME \
+;;     claude --mode=direct
+;;
+
+(version 1)
+
+(deny default)
+
+;; ================================================================
+;; System fundamentals — required for any process to function
+;; ================================================================
+
+(allow sysctl-read)
+(allow mach-lookup)            ; system services (tighten in future iteration)
+(allow mach-register)
+(allow signal (target self))
+(allow process-fork)
+(allow iokit-open)             ; device access for entropy, etc.
+(allow ipc-posix-shm-read*)   ; shared memory (node.js uses this)
+(allow ipc-posix-shm-write*)
+(allow system-socket)          ; needed for network stack init
+
+;; ================================================================
+;; Path traversal — directory entries for filesystem navigation
+;; Processes need to stat parent dirs when resolving allowed subpaths.
+;; The regex covers rig-level dirs: ~/gt/<rig>/
+;; ================================================================
+
+(allow file-read-data file-read-metadata
+    (literal "/")
+    (literal "/Users")
+    (literal (param "USER_HOME"))
+    (literal (param "GT_HOME"))
+    (regex #"^/Users/[^/]+/gt/[^/]+$"))
+
+;; /dev/null, /dev/urandom, etc. — need read+write
+(allow file-read* file-write*
+    (literal "/dev/null")
+    (literal "/dev/zero")
+    (literal "/dev/urandom")
+    (literal "/dev/random")
+    (subpath "/dev/fd")
+    (literal "/dev/tty"))
+
+;; System libraries, frameworks, and core OS files
+(allow file-read*
+    (subpath "/System")
+    (subpath "/usr")
+    (subpath "/Library")
+    (subpath "/private")
+    (subpath "/etc")
+    (subpath "/var")
+    (subpath "/dev")
+    (subpath "/bin")
+    (subpath "/opt"))
+
+;; Temp directories (read + write)
+(allow file-read* file-write*
+    (subpath "/private/tmp")
+    (subpath "/tmp")
+    (subpath "/private/var/folders"))
+
+;; ================================================================
+;; Required binaries — execute permissions
+;; ================================================================
+
+(allow process-exec
+    ;; System: git, bash, zsh, env, etc.
+    (subpath "/usr")
+    (subpath "/bin")
+    ;; Xcode CLI tools (git delegates here)
+    (subpath "/Library/Developer/CommandLineTools")
+    ;; Homebrew: claude, bd, tmux, and dependencies
+    (subpath "/opt/homebrew")
+    ;; gt binary
+    (subpath (string-append (param "USER_HOME") "/.local/bin"))
+    ;; bd binary
+    (subpath (string-append (param "USER_HOME") "/go/bin"))
+    ;; Node.js via nvm
+    (subpath (string-append (param "USER_HOME") "/.nvm")))
+
+;; ================================================================
+;; User-specific paths — read only (binary dirs)
+;; ================================================================
+
+(allow file-read*
+    (subpath (string-append (param "USER_HOME") "/.local/bin"))
+    (subpath (string-append (param "USER_HOME") "/go/bin"))
+    (subpath (string-append (param "USER_HOME") "/.nvm")))
+
+;; ================================================================
+;; Claude Code configuration — read + write
+;; Claude needs write access for session state, MCP config, etc.
+;; ================================================================
+
+(allow file-read* file-write*
+    (subpath (string-append (param "USER_HOME") "/.claude")))
+
+;; ================================================================
+;; Git configuration — read only
+;; ================================================================
+
+(allow file-read*
+    (literal (string-append (param "USER_HOME") "/.gitconfig"))
+    (literal (string-append (param "USER_HOME") "/.config/git/config")))
+
+;; ================================================================
+;; Polecat worktree — READ + WRITE
+;; This is the polecat's git working directory.
+;; ================================================================
+
+(allow file-read* file-write*
+    (subpath (param "WORKTREE_PATH")))
+
+;; ================================================================
+;; GT shared directories — READ ONLY
+;; Beads databases, runtime state, docs, config, git repo
+;; ================================================================
+
+(allow file-read*
+    ;; Town-level beads and runtime
+    (subpath (string-append (param "GT_HOME") "/.beads"))
+    (subpath (string-append (param "GT_HOME") "/.runtime"))
+    ;; Rig-level beads and git repo (worktree references live in .repo.git)
+    (subpath (string-append (param "GT_HOME") "/gastown/.beads"))
+    (subpath (string-append (param "GT_HOME") "/gastown/.repo.git"))
+    ;; Docs and shared config
+    (subpath (string-append (param "GT_HOME") "/docs"))
+    (literal (string-append (param "GT_HOME") "/CLAUDE.md")))
+
+;; ================================================================
+;; GT runtime state — WRITE (heartbeats, nudge queue, pids, locks)
+;; ================================================================
+
+(allow file-read* file-write*
+    (subpath (string-append (param "GT_HOME") "/.runtime/heartbeats"))
+    (subpath (string-append (param "GT_HOME") "/.runtime/nudge_queue"))
+    (subpath (string-append (param "GT_HOME") "/.runtime/pids"))
+    (subpath (string-append (param "GT_HOME") "/.runtime/locks")))
+
+;; ================================================================
+;; Network
+;; ================================================================
+
+;; Loopback — Dolt SQL server (:3307) and other local services
+(allow network-outbound
+    (remote ip "localhost:*"))
+(allow network-inbound
+    (local ip "localhost:*"))
+
+;; HTTPS outbound — required for Anthropic API
+(allow network-outbound
+    (remote tcp "*:443"))
+
+;; DNS resolution — required for API hostname resolution
+(allow network-outbound
+    (remote udp "*:53"))
+
+;; ================================================================
+;; EXPLICITLY DENIED (by deny default):
+;;   - ~/.ssh (private keys, known_hosts)
+;;   - Arbitrary filesystem writes outside worktree + runtime
+;;   - Non-loopback non-HTTPS outbound (SSH, HTTP, raw TCP)
+;;   - Other users' home directories
+;;   - /etc writes, system modification
+;;   - Raw socket access
+;; ================================================================
