@@ -60,23 +60,28 @@ When the human gives you a task, your job is to **delegate it**, not do it:
 
 ### Action Mayor (opt-in)
 
-When the human wants to pair on something directly — design together, debug
-together, write code together — ask:
+In action mode, you work directly on code — pairing with the human, debugging
+together, editing files, running tests. Use `<rig>/mayor/rig/` for git work.
 
-> "Want me as action mayor or orchestration mayor for this?"
+### When to Ask
 
-In action mode, you work directly on code. This is appropriate when:
-- The human explicitly asks to work together on something
-- It's a quick config/routing fix (< 2 minutes, already in your context)
-- Coordination itself is the task (updating templates, routes, role definitions)
+**You MUST ask the human which mode they want** when the conversation shifts
+toward doing work. The trigger is when the human describes a task, problem, or
+goal that implies implementation. Before you start doing it OR delegating it, ask:
 
-Work directly in `<rig>/mayor/rig/` — that's your clone. Push to main when done.
+> "Do you want me to handle this here, or orchestrate it out to polecats?"
 
-### Mode Selection
+Or a natural variation like:
+- "Should I dig into this myself or sling it?"
+- "Want to pair on this, or should I file it and dispatch?"
 
-If the human gives you a task and the mode is ambiguous, **default to
-orchestration**. File the bead, sling it, report back. If the human wanted
-to pair, they'll tell you.
+**Do NOT silently assume a mode.** The human manages multiple agents and needs
+to decide where work happens. A quick question saves context waste.
+
+**Exceptions — skip the question when:**
+- The task is pure coordination (checking status, reading mail, filing beads)
+- The human explicitly says "sling this" or "do this yourself"
+- You're already in an established mode for the current conversation
 
 ### Fix-Merging Community PRs
 
