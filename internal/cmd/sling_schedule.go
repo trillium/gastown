@@ -61,6 +61,7 @@ type ScheduleOptions struct {
 	Agent       string   // Agent override (e.g., "gemini", "codex")
 	HookRawBead bool     // Hook raw bead without default formula
 	Ralph       bool     // Ralph Wiggum loop mode
+	Machine     string   // Dispatch to a specific satellite machine (from machines.json)
 }
 
 // scheduleBead schedules a bead for deferred dispatch via the capacity scheduler.
@@ -170,6 +171,9 @@ func scheduleBead(beadID, rigName string, opts ScheduleOptions) error {
 		fields.Mode = "ralph"
 	}
 	fields.Owned = opts.Owned
+	if opts.Machine != "" {
+		fields.Machine = opts.Machine
+	}
 
 	// Create sling context bead in the target rig's beads dir so the rig's
 	// witness discovers it during patrol. (GH#3468)
