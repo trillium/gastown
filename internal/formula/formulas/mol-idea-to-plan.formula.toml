@@ -718,17 +718,55 @@ From: {{problem}} implementation plan
 "
 ```
 
-**3. Set up dependencies:**
+**3. Create eval/smoke-test beads inline (REQUIRED):**
 
-After creating all beads, wire up the dependencies based on the plan's
-sequencing:
+For each implementation bead that adds a skill, workflow, UI flow, or agent
+capability, create a corresponding eval bead immediately after:
+
+```bash
+bd create "Eval: <feature name>" --type=task --description="
+## Context
+Eval bead for: <implementation bead ID and title>
+
+## What
+Validate that <feature> works correctly end-to-end.
+
+## Eval Criteria
+- <For LLM/agent skills>: test extraction quality, grading accuracy, edge cases
+- <For UI features>: E2E smoke test — start the stack, navigate to the feature,
+  click through every user story, take screenshots as evidence
+- <For workflows>: run the workflow end-to-end, verify expected outputs
+- <For API endpoints>: test request/response, error cases, auth
+
+## Acceptance Criteria
+- All success criteria from the PRD are verified (not just code-reviewed)
+- Evidence is captured (screenshots, test output, logs)
+- CI passes on the integrated branch (not just per-package)
+"
+# Wire eval bead to depend on its implementation bead:
+bd dep add <eval-bead-id> <impl-bead-id>
+```
+
+**Rules for eval beads:**
+- Every implementation bead that adds user-facing behavior gets an eval bead
+- Eval beads depend on their implementation bead (eval runs after impl)
+- Infrastructure/refactoring beads (no user-facing behavior) do NOT need evals
+- The eval bead validates the feature works, not just that the code compiles
+- For UI features: the eval must use browser automation (Playwright MCP) to
+  take actual screenshots — code-level review alone is insufficient
+- A capstone eval bead should exist that validates the full integrated feature
+
+**4. Set up dependencies:**
+
+After creating all beads (implementation + eval), wire up the dependencies
+based on the plan's sequencing:
 
 ```bash
 # X needs Y means Y blocks X:
 bd dep add <task-x-id> <task-y-id>  # x depends on y (y blocks x)
 ```
 
-**4. Create a tracking epic:**
+**5. Create a tracking epic:**
 ```bash
 bd create "{{problem}}" --type=epic --description="
 Implementation of: {{problem}}
@@ -741,13 +779,13 @@ Implementation of: {{problem}}
 "
 ```
 
-**5. Verify the dependency graph:**
+**6. Verify the dependency graph:**
 ```bash
 bd blocked  # should show clean topological order
 bv --robot-mode  # if available: graph visualization
 ```
 
-**6. Notify the human in conversation:**
+**7. Notify the human in conversation:**
 
 Output:
 
@@ -763,8 +801,8 @@ Output:
 - Kick off agent swarm: gt sling <first-bead-id> <rig>
 ```
 
-**Exit criteria:** All plan tasks exist as beads. Dependencies are correctly wired.
-Epic created. Human notified."""
+**Exit criteria:** All plan tasks exist as beads with corresponding eval beads
+for user-facing features. Dependencies are correctly wired. Epic created. Human notified."""
 
 [[steps]]
 id = "verify-beads-pass-1"
@@ -797,6 +835,8 @@ discrete work item, verify a corresponding bead exists that covers it. Check:
 - Does the bead's description capture the key requirements from the plan?
 - Are acceptance criteria present and specific?
 - Are file paths and technical details preserved?
+- Does every user-facing implementation bead have a corresponding eval bead?
+- Do eval beads specify concrete validation steps (not just code review)?
 
 **4. Create missing beads:**
 
@@ -851,6 +891,10 @@ requirements that only become visible after the first pass filled gaps.
   documentation updates) mentioned across multiple phases?
 - Do any beads have descriptions that are too vague to be actionable?
   If so, update them with specifics from the plan.
+- Are there implementation beads for skills, workflows, or UI flows that are
+  missing eval beads? Create eval beads for any that were missed.
+- Is there a capstone eval bead that validates the full integrated feature
+  end-to-end? If not, create one.
 
 **Exit criteria:** Second pass complete. Any new gaps filled."""
 
@@ -884,7 +928,7 @@ Output:
 ## Beads Verified: {{problem}}
 
 ### Coverage
-- Total beads: <count>
+- Total beads: <count> (implementation: <count>, eval: <count>)
 - Created in initial pass: <count>
 - Added in verification pass 1: <count>
 - Added in verification pass 2: <count>
