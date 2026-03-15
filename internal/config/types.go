@@ -1596,6 +1596,7 @@ func (mc *MachinesConfig) HubSSHTarget() string {
 	return mc.DoltHost
 }
 
+
 func (mc *MachinesConfig) ProxyURL(machineHost string) string {
 	port := 9876
 	if machineHost == mc.DoltHost {
