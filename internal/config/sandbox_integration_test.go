@@ -12,8 +12,8 @@ import (
 	"testing"
 )
 
-// Sandbox integration tests verify that exec-wrapper plugins using
-// macOS sandbox-exec actually enforce filesystem and network restrictions.
+// Sandbox integration tests verify that macOS sandbox-exec
+// actually enforces filesystem and network restrictions.
 //
 // These tests use sandbox-exec directly (the underlying mechanism that
 // exitbox wraps) to validate that the gastown-polecat sandbox profile
@@ -287,115 +287,3 @@ func TestSandbox_AllowLoopbackNetwork(t *testing.T) {
 	}
 }
 
-// TestSandbox_ExecWrapperIntegration is the end-to-end test:
-// it builds a startup command via BuildStartupCommand with sandbox-exec
-// as the exec wrapper, runs it, and verifies the sandbox enforces
-// write restrictions while allowing reads and writes inside the project dir.
-func TestSandbox_ExecWrapperIntegration(t *testing.T) {
-	skipIfNoSandboxExec(t)
-	t.Parallel()
-
-	// Set up directories
-	projectDir := t.TempDir()
-	profileDir := t.TempDir()
-	profilePath := writeSandboxProfile(t, profileDir)
-	townRoot := t.TempDir()
-	rigPath := filepath.Join(townRoot, "testrig")
-
-	// Use home dir as the "outside" target — it's NOT under /private/tmp
-	// so the sandbox will deny writes there.
-	homeDir, err := os.UserHomeDir()
-	if err != nil {
-		t.Fatalf("get home dir: %v", err)
-	}
-	breachFile := filepath.Join(homeDir, ".sandbox-integration-breach")
-	// Ensure cleanup even if test fails
-	defer os.Remove(breachFile)
-
-	// Create a stub "agent" script that tests sandbox enforcement
-	agentScript := filepath.Join(projectDir, "test-agent.sh")
-	agentCode := fmt.Sprintf(`#!/bin/sh
-# Test 1: Write inside project dir (should succeed)
-echo "allowed-write" > %q/sandbox-test-ok.txt
-if [ $? -eq 0 ]; then echo "PASS: write-inside-project"; else echo "FAIL: write-inside-project"; fi
-
-# Test 2: Read back what we wrote (should succeed)
-content=$(cat %q/sandbox-test-ok.txt 2>&1)
-if [ "$content" = "allowed-write" ]; then echo "PASS: read-inside-project"; else echo "FAIL: read-inside-project got=$content"; fi
-
-# Test 3: Write outside project dir (home dir — should be denied)
-echo "breach" > %q 2>/dev/null
-if [ $? -ne 0 ]; then echo "PASS: write-outside-denied"; else echo "FAIL: write-outside-denied"; fi
-
-# Test 4: External network (should be denied)
-curl -s --connect-timeout 2 http://1.1.1.1/ > /dev/null 2>&1
-if [ $? -ne 0 ]; then echo "PASS: external-network-denied"; else echo "FAIL: external-network-denied"; fi
-
-echo "DONE"
-`, projectDir, projectDir, breachFile)
-
-	if err := os.WriteFile(agentScript, []byte(agentCode), 0755); err != nil {
-		t.Fatalf("write agent script: %v", err)
-	}
-
-	// Configure rig settings with sandbox-exec as the exec wrapper
-	rigSettings := NewRigSettings()
-	rigSettings.Runtime = &RuntimeConfig{
-		Command: agentScript,
-		ExecWrapper: []string{
-			"sandbox-exec",
-			"-D", "PROJECT_DIR=" + projectDir,
-			"-f", profilePath,
-		},
-	}
-	if err := SaveRigSettings(RigSettingsPath(rigPath), rigSettings); err != nil {
-		t.Fatalf("SaveRigSettings: %v", err)
-	}
-
-	// Build the startup command (this is what session_manager would do)
-	startupCmd := BuildStartupCommand(
-		map[string]string{"GT_ROLE": "testrig/polecats/test"},
-		rigPath, "",
-	)
-
-	// Verify the command structure
-	if !strings.Contains(startupCmd, "sandbox-exec") {
-		t.Fatalf("expected sandbox-exec in startup command, got: %q", startupCmd)
-	}
-	if !strings.Contains(startupCmd, "-f "+profilePath) {
-		t.Fatalf("expected profile path in command, got: %q", startupCmd)
-	}
-
-	// Strip "exec " prefix since we're not replacing the process
-	runCmd := strings.TrimPrefix(startupCmd, "exec ")
-
-	// Run the startup command via shell
-	out, err := exec.Command("/bin/sh", "-c", runCmd).CombinedOutput()
-	output := string(out)
-	t.Logf("Startup command output:\n%s", output)
-	if err != nil {
-		t.Logf("Command error (may be expected for denied operations): %v", err)
-	}
-
-	// Verify all sandbox enforcement results
-	if !strings.Contains(output, "PASS: write-inside-project") {
-		t.Error("sandbox should allow writes inside project dir")
-	}
-	if !strings.Contains(output, "PASS: read-inside-project") {
-		t.Error("sandbox should allow reads inside project dir")
-	}
-	if !strings.Contains(output, "PASS: write-outside-denied") {
-		t.Error("sandbox should deny writes outside project dir")
-	}
-	if !strings.Contains(output, "PASS: external-network-denied") {
-		t.Error("sandbox should deny external network access")
-	}
-	if !strings.Contains(output, "DONE") {
-		t.Error("agent script did not complete — sandbox may have killed it")
-	}
-
-	// Double-check: the breach file should not exist
-	if _, err := os.Stat(breachFile); err == nil {
-		t.Fatal("sandbox breach: file was created outside project dir")
-	}
-}

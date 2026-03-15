@@ -286,9 +286,6 @@ func printPluginSummary(p *plugin.Plugin) {
 	}
 
 	typeTag := gateType
-	if p.IsExecWrapper() {
-		typeTag = "exec-wrapper"
-	}
 
 	fmt.Printf("    %s %s\n", style.Bold.Render(p.Name), style.Dim.Render(fmt.Sprintf("[%s]", typeTag)))
 	if desc != "" {
@@ -376,9 +373,6 @@ func outputPluginShowText(p *plugin.Plugin) error {
 		fmt.Printf("%s\n", style.Bold.Render("Execution:"))
 		if p.Execution.Type != "" {
 			fmt.Printf("  Type: %s\n", p.Execution.Type)
-		}
-		if len(p.Execution.Wrapper) > 0 {
-			fmt.Printf("  Wrapper: %s\n", strings.Join(p.Execution.Wrapper, " "))
 		}
 		if p.Execution.Timeout != "" {
 			fmt.Printf("  Timeout: %s\n", p.Execution.Timeout)

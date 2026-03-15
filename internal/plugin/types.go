@@ -119,16 +119,11 @@ const (
 	// ExecTypeScript means a run.sh script is executed directly.
 	ExecTypeScript ExecutionType = "script"
 
-	// ExecTypeExecWrapper wraps session startup commands.
-	// Instead of being dispatched to a dog, the wrapper tokens are inserted
-	// between `exec env VAR=val ...` and the agent binary in the startup command.
-	// Example: ["exitbox", "run", "--profile=gastown-polecat", "--"]
-	ExecTypeExecWrapper ExecutionType = "exec-wrapper"
 )
 
 // Execution defines plugin execution settings.
 type Execution struct {
-	// Type is the execution type: "agent" (default), "script", or "exec-wrapper".
+	// Type is the execution type: "agent" (default) or "script".
 	Type ExecutionType `json:"type,omitempty" toml:"type,omitempty"`
 
 	// Timeout is the maximum execution time (e.g., "5m").
@@ -140,11 +135,6 @@ type Execution struct {
 	// Severity is the escalation severity on failure.
 	Severity string `json:"severity,omitempty" toml:"severity,omitempty"`
 
-	// Wrapper is the command tokens for exec-wrapper plugins.
-	// These are inserted between the env vars and the agent command at session startup.
-	// Example: ["exitbox", "run", "--profile=gastown-polecat", "--"]
-	// Only used when Type is "exec-wrapper".
-	Wrapper []string `json:"wrapper,omitempty" toml:"wrapper,omitempty"`
 }
 
 // PluginFrontmatter represents the TOML frontmatter in plugin.md files.
@@ -155,20 +145,6 @@ type PluginFrontmatter struct {
 	Gate        *Gate      `toml:"gate,omitempty"`
 	Tracking    *Tracking  `toml:"tracking,omitempty"`
 	Execution   *Execution `toml:"execution,omitempty"`
-}
-
-// IsExecWrapper returns true if this plugin is an exec-wrapper type.
-func (p *Plugin) IsExecWrapper() bool {
-	return p.Execution != nil && p.Execution.Type == ExecTypeExecWrapper
-}
-
-// ExecWrapperArgs returns the wrapper command tokens for an exec-wrapper plugin.
-// Returns nil if the plugin is not an exec-wrapper or has no wrapper configured.
-func (p *Plugin) ExecWrapperArgs() []string {
-	if !p.IsExecWrapper() || len(p.Execution.Wrapper) == 0 {
-		return nil
-	}
-	return p.Execution.Wrapper
 }
 
 // PluginSummary provides a concise overview of a plugin.
