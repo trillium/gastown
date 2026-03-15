@@ -1,4 +1,4 @@
-.PHONY: build desktop-build desktop-run install safe-install check-forward-only clean test test-e2e-container check-up-to-date
+.PHONY: build desktop-build desktop-run install safe-install distribute check-forward-only clean test test-e2e-container check-up-to-date
 
 BINARY := gt
 BINARY_DESKTOP := gt-desktop
@@ -138,6 +138,53 @@ safe-install: check-up-to-date check-forward-only build
 	done
 	@echo "Installed $(BINARY) to $(INSTALL_DIR)/$(BINARY) (daemon NOT restarted)"
 	@echo "Sessions will pick up new binary on next cycle."
+
+# distribute: Copy built binaries to all enabled satellite machines.
+# Reads machines.json for SSH aliases and install paths. All machines must be
+# arm64 macOS (same architecture — no cross-compilation needed).
+#
+# Satellites use gt-proxy-client as their gt binary (symlinked).
+# This distributes gt-proxy-client and gt-proxy-server to each satellite,
+# then verifies the version. The gt symlink is created if missing.
+TOWN_ROOT ?= $(HOME)/gt
+MACHINES_JSON ?= $(TOWN_ROOT)/mayor/machines.json
+
+distribute: build
+	@if [ ! -f "$(MACHINES_JSON)" ]; then \
+		echo "Error: $(MACHINES_JSON) not found"; \
+		exit 1; \
+	fi
+	@echo "Distributing binaries to satellites..."
+	@python3 -c '\
+import json, sys; \
+f = open("$(MACHINES_JSON)"); d = json.load(f); \
+machines = d.get("machines", {}); \
+[print(name, m["ssh_alias"], m["user"]) for name, m in machines.items() if m.get("enabled")]' > /tmp/_gt_dist_machines
+	@while IFS=' ' read -r name alias user; do \
+		d="/Users/$$user/.local/bin"; \
+		echo "  → $$name ($$alias):"; \
+		scp -q $(BUILD_DIR)/$(BINARY) "$$alias:$$d/$(BINARY).real.new" </dev/null && \
+		scp -q $(BUILD_DIR)/$(BINARY)-proxy-client "$$alias:$$d/$(BINARY)-proxy-client.new" </dev/null && \
+		scp -q $(BUILD_DIR)/$(BINARY)-proxy-server "$$alias:$$d/$(BINARY)-proxy-server.new" </dev/null && \
+		ssh -n "$$alias" " \
+			mv $$d/$(BINARY).real.new $$d/$(BINARY).real; \
+			mv $$d/$(BINARY)-proxy-client.new $$d/$(BINARY)-proxy-client; \
+			mv $$d/$(BINARY)-proxy-server.new $$d/$(BINARY)-proxy-server; \
+			codesign -f -s - $$d/$(BINARY).real 2>/dev/null; \
+			codesign -f -s - $$d/$(BINARY)-proxy-client 2>/dev/null; \
+			codesign -f -s - $$d/$(BINARY)-proxy-server 2>/dev/null; \
+			if [ ! -e $$d/$(BINARY) ] || [ -L $$d/$(BINARY) ]; then \
+				ln -sf $$d/$(BINARY)-proxy-client $$d/$(BINARY); \
+			fi; \
+			echo \"    gt.real: \$$($$d/$(BINARY).real version 2>&1)\"; \
+			echo \"    gt:      \$$($$d/$(BINARY) version 2>&1)\"" || \
+		echo "    ✗ FAILED ($$alias)"; \
+	done < /tmp/_gt_dist_machines
+	@rm -f /tmp/_gt_dist_machines
+
+# install-all: Build, install locally, restart daemon, and distribute to satellites.
+install-all: install distribute
+	@echo "Build complete: local + $$(python3 -c 'import json; d=json.load(open("$(MACHINES_JSON)")); print(sum(1 for m in d.get("machines",{}).values() if m.get("enabled")))' 2>/dev/null || echo '?') satellite(s)"
 
 clean:
 	rm -f $(BUILD_DIR)/$(BINARY)
