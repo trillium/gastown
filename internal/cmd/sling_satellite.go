@@ -324,7 +324,6 @@ func spawnRemoteSatellite(
 		doltPort,
 		proxyURL,
 		certResp,
-		opts,
 		machine.GtBinary,
 	)
 	if err != nil {
@@ -490,7 +489,6 @@ func spawnOnTarget(
 	doltHost string, doltPort int,
 	proxyURL string,
 	cert *issueCertResponse,
-	opts SlingSpawnOptions,
 	gtBinary string,
 ) (*SatelliteSpawnResult, error) {
 	script := buildBootstrapScript(townRoot, rigName, polecatName, doltHost, doltPort, proxyURL, gtBinary)
