@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -122,6 +123,8 @@ type ResolvedTarget struct {
 	DelayedDogInfo    *DogDispatchInfo
 	NewPolecatInfo    *SpawnedPolecatInfo
 	IsSelfSling       bool
+	DispatchMachine   string              // Non-empty when dispatched to a satellite
+	DispatchEntry     *config.MachineEntry // Machine config for satellite dispatch
 }
 
 // resolveTarget resolves a target specification to agent, pane, and working directory.
@@ -254,6 +257,8 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			result.NewPolecatInfo = spawnInfo
 			result.WorkDir = spawnInfo.ClonePath
 			result.HookSetAtomically = opts.HookBead != ""
+			result.DispatchMachine = dispatchMachine
+			result.DispatchEntry = dispatchEntry
 			return result, nil
 		}
 
