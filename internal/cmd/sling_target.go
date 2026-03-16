@@ -238,7 +238,7 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			if err != nil {
 				return nil, fmt.Errorf("loading machines config: %w", err)
 			}
-			satResult, err := spawnRemoteSatellite(machines, dispatchMachine, dispatchEntry, rigName, spawnOpts)
+			satResult, err := spawnRemoteSatellite(machines, dispatchMachine, dispatchEntry, rigName)
 			if err != nil {
 				return nil, fmt.Errorf("satellite spawn: %w", err)
 			}
