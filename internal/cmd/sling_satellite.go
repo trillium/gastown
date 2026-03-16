@@ -544,6 +544,129 @@ func killRemoteSession(sshTarget, sessionName string) error {
 	return err
 }
 
+// startRemoteSatelliteSession launches the agent (e.g., Claude) in the
+// already-bootstrapped remote tmux session. The bootstrap script creates the
+// session and wires proxy env vars, but never starts the agent — that's our job.
+//
+// Strategy: build a startup script locally (avoids multi-layer shell escaping),
+// pipe it to the satellite via SSH + `cat > /tmp/file`, then send-keys in tmux
+// to exec it. The exec replaces the shell so when Claude exits, the pane dies.
+func startRemoteSatelliteSession(
+	machine *config.MachineEntry,
+	spawnInfo *SpawnedPolecatInfo,
+	beadToHook string,
+) error {
+	sshTarget := machine.SSHTarget()
+	sessName := spawnInfo.SessionName
+	rigName := spawnInfo.RigName
+	polecatName := spawnInfo.PolecatName
+
+	// Remote paths
+	remoteTownRoot := machine.TownRoot
+	if remoteTownRoot == "" {
+		remoteTownRoot = "~/gt"
+	}
+	// --- Step 1: Set env vars in remote tmux session (for inspection/respawn) ---
+	envVars := config.AgentEnv(config.AgentEnvConfig{
+		Role:      constants.RolePolecat,
+		Rig:       rigName,
+		AgentName: polecatName,
+		TownRoot:  remoteTownRoot,
+	})
+	// Override GT_AGENT if agent override is specified
+	if spawnInfo.agent != "" {
+		envVars["GT_AGENT"] = spawnInfo.agent
+	}
+
+	for key, val := range envVars {
+		if val == "" {
+			continue // tmux setenv rejects empty values
+		}
+		cmd := fmt.Sprintf("tmux setenv -t %s %s %s", sessName, key, config.ShellQuote(val))
+		if _, err := runSSH(sshTarget, cmd, 10*time.Second); err != nil {
+			return fmt.Errorf("setting tmux env %s: %w", key, err)
+		}
+	}
+
+	// --- Step 2: Build startup command locally ---
+	localTownRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("finding local town root: %w", err)
+	}
+	localRigPath := filepath.Join(localTownRoot, rigName)
+
+	// Resolve agent config (agents.json is in git, same on satellite)
+	var rc *config.RuntimeConfig
+	if spawnInfo.agent != "" {
+		resolved, _, err := config.ResolveAgentConfigWithOverride(localTownRoot, localRigPath, spawnInfo.agent)
+		if err != nil {
+			return fmt.Errorf("resolving agent config for %s: %w", spawnInfo.agent, err)
+		}
+		rc = resolved
+	} else {
+		rc = config.ResolveRoleAgentConfig("polecat", localTownRoot, localRigPath)
+	}
+
+	// Build beacon
+	beacon := session.FormatStartupBeacon(session.BeaconConfig{
+		Recipient: session.BeaconRecipient("polecat", polecatName, rigName),
+		Sender:    "sling",
+		Topic:     "assigned",
+		MolID:     beadToHook,
+	})
+
+	// Build the agent command (e.g., `claude --resume --dangerously-skip-permissions "beacon"`)
+	agentCmd := rc.BuildCommandWithPrompt(beacon)
+
+	// Rewrite local paths to remote paths in the agent command.
+	// ResolveRoleAgentConfig injects --settings with the local rig path;
+	// on the satellite the town root (and thus rig path) differs.
+	if localTownRoot != remoteTownRoot {
+		agentCmd = strings.ReplaceAll(agentCmd, localTownRoot, remoteTownRoot)
+	}
+
+	// Build env export prefix using remote paths
+	// Start with the same env vars we set in tmux, but use remote paths
+	exportEnv := make(map[string]string, len(envVars))
+	for k, v := range envVars {
+		exportEnv[k] = v
+	}
+
+	// --- Step 3: Write temp script + launch via tmux send-keys ---
+	scriptName := fmt.Sprintf("/tmp/gt-satellite-%s.sh", sessName)
+
+	// Build the script content
+	var scriptBuf strings.Builder
+	scriptBuf.WriteString("#!/bin/bash\n")
+	scriptBuf.WriteString("exec env")
+	// Sort keys for deterministic output
+	envKeys := make([]string, 0, len(exportEnv))
+	for k := range exportEnv {
+		envKeys = append(envKeys, k)
+	}
+	sort.Strings(envKeys)
+	for _, k := range envKeys {
+		if exportEnv[k] == "" {
+			continue
+		}
+		scriptBuf.WriteString(fmt.Sprintf(" %s=%s", k, config.ShellQuote(exportEnv[k])))
+	}
+	scriptBuf.WriteString(" " + agentCmd + "\n")
+	scriptContent := scriptBuf.String()
+
+	// SSH command: read script from stdin, write to temp file, chmod, send-keys
+	remoteCmd := fmt.Sprintf(
+		"cat > %s && chmod +x %s && tmux send-keys -t %s 'exec %s' Enter",
+		scriptName, scriptName, sessName, scriptName,
+	)
+
+	if _, err := runSSHWithStdin(sshTarget, remoteCmd, []byte(scriptContent), 30*time.Second); err != nil {
+		return fmt.Errorf("launching agent on satellite: %w", err)
+	}
+
+	return nil
+}
+
 // runSSH executes a command on a remote machine via SSH.
 func runSSH(sshTarget, remoteCmd string, timeout time.Duration) (string, error) {
 	return runSSHWithStdin(sshTarget, remoteCmd, nil, timeout)

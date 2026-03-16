@@ -398,15 +398,26 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 
 	// 11. Start polecat session
-	pane, err := spawnInfo.StartSession()
-	if err != nil {
-		fmt.Printf("  %s Could not start session: %v, cleaning up partial state...\n", style.Dim.Render("✗"), err)
-		rollbackSlingArtifactsFn(spawnInfo, beadToHook, hookWorkDir, convoyID)
-		result.ErrMsg = fmt.Sprintf("session failed: %v", err)
-		return result, fmt.Errorf("starting polecat session: %w", err)
+	if dispatchMachine != "" {
+		// Satellite: launch agent in the remote tmux session
+		if err := startRemoteSatelliteSession(dispatchEntry, spawnInfo, beadToHook); err != nil {
+			fmt.Printf("  %s Could not start remote session: %v, cleaning up...\n", style.Dim.Render("✗"), err)
+			rollbackSlingArtifactsFn(spawnInfo, beadToHook, hookWorkDir, convoyID)
+			result.ErrMsg = fmt.Sprintf("remote session failed: %v", err)
+			return result, fmt.Errorf("starting remote satellite session: %w", err)
+		}
+		fmt.Printf("  %s Remote session started for %s on %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName, dispatchMachine)
+	} else {
+		pane, err := spawnInfo.StartSession()
+		if err != nil {
+			fmt.Printf("  %s Could not start session: %v, cleaning up partial state...\n", style.Dim.Render("✗"), err)
+			rollbackSlingArtifactsFn(spawnInfo, beadToHook, hookWorkDir, convoyID)
+			result.ErrMsg = fmt.Sprintf("session failed: %v", err)
+			return result, fmt.Errorf("starting polecat session: %w", err)
+		}
+		fmt.Printf("  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
+		_ = pane
 	}
-	fmt.Printf("  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
-	_ = pane
 
 	result.Success = true
 	return result, nil
