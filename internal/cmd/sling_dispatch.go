@@ -253,7 +253,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 			result.ErrMsg = err.Error()
 			return result, fmt.Errorf("loading machines config: %w", err)
 		}
-		satResult, err := spawnRemoteSatellite(machines, dispatchMachine, dispatchEntry, params.RigName, spawnOpts)
+		satResult, err := spawnRemoteSatellite(machines, dispatchMachine, dispatchEntry, params.RigName)
 		if err != nil {
 			result.ErrMsg = err.Error()
 			return result, fmt.Errorf("satellite spawn: %w", err)

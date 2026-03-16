@@ -276,7 +276,6 @@ func spawnRemoteSatellite(
 	machineName string,
 	machine *config.MachineEntry,
 	rigName string,
-	opts SlingSpawnOptions,
 ) (*SatelliteSpawnResult, error) {
 	townRoot, err := workspace.FindFromCwdOrError()
 	if err != nil {
