@@ -1,6 +1,7 @@
 package dispatch
 
 import (
+	"sync"
 	"testing"
 )
 
@@ -388,6 +389,49 @@ func TestLeastLoadedWithCapacity_Empty(t *testing.T) {
 	best := leastLoadedWithCapacity(nil)
 	if best != nil {
 		t.Error("expected nil for empty slice")
+	}
+}
+
+// --- RoundRobin concurrency ---
+
+func TestRoundRobin_ConcurrentSafe(t *testing.T) {
+	// Verify that round-robin routing is safe under concurrent calls.
+	// The atomic counter must not produce data races.
+	ResetRoundRobinCounter()
+	p := RoundRobinPolicy{}
+	ctx := RoutingContext{
+		Machines:  satMachines(0, 0, 0),
+		LocalLoad: localLoad(0, 4),
+	}
+
+	const goroutines = 10
+	const callsEach = 20
+	var wg sync.WaitGroup
+	results := make(chan string, goroutines*callsEach)
+
+	for i := 0; i < goroutines; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			for j := 0; j < callsEach; j++ {
+				r, err := p.Route(ctx)
+				if err != nil {
+					t.Errorf("concurrent Route() error: %v", err)
+					return
+				}
+				results <- r.Machine
+			}
+		}()
+	}
+	wg.Wait()
+	close(results)
+
+	total := 0
+	for range results {
+		total++
+	}
+	if total != goroutines*callsEach {
+		t.Errorf("expected %d results, got %d", goroutines*callsEach, total)
 	}
 }
 

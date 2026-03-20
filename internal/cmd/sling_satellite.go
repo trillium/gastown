@@ -10,6 +10,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"time"
 
@@ -198,23 +199,33 @@ func buildRoutingContext(machines *config.MachinesConfig) dispatch.RoutingContex
 	return ctx
 }
 
-// countRemotePolecats SSHes to each worker and counts active polecat tmux sessions.
+// countRemotePolecats SSHes to each worker in parallel and counts active polecat tmux sessions.
 // Returns a map of machine name → active polecat count.
 func countRemotePolecats(machines *config.MachinesConfig, workerNames []string) map[string]int {
 	counts := make(map[string]int, len(workerNames))
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+
 	for _, name := range workerNames {
 		entry, ok := machines.Machines[name]
 		if !ok {
 			continue
 		}
-		count, err := countRemotePolecatsOnMachine(entry)
-		if err != nil {
-			// SSH failure → assume machine is busy (conservative: don't overload)
-			counts[name] = entry.MaxPolecats
-			continue
-		}
-		counts[name] = count
+		wg.Add(1)
+		go func(n string, e *config.MachineEntry) {
+			defer wg.Done()
+			count, err := countRemotePolecatsOnMachine(e)
+			mu.Lock()
+			defer mu.Unlock()
+			if err != nil {
+				// SSH failure → assume machine is busy (conservative: don't overload)
+				counts[n] = e.MaxPolecats
+				return
+			}
+			counts[n] = count
+		}(name, entry)
 	}
+	wg.Wait()
 	return counts
 }
 
