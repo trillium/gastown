@@ -5,6 +5,7 @@ import (
 	"os"
 	"strings"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -110,6 +111,7 @@ type ResolveTargetOptions struct {
 	TownRoot   string
 	WorkDesc   string // Description for dog dispatch (defaults to HookBead if empty)
 	BaseBranch string // Override base branch for polecat worktree
+	Machine    string // --machine: satellite target (skips local docked check)
 }
 
 // ResolvedTarget holds the results of target resolution.
@@ -121,6 +123,8 @@ type ResolvedTarget struct {
 	DelayedDogInfo    *DogDispatchInfo
 	NewPolecatInfo    *SpawnedPolecatInfo
 	IsSelfSling       bool
+	DispatchMachine   string              // Non-empty when dispatched to a satellite
+	DispatchEntry     *config.MachineEntry // Machine config for satellite dispatch
 }
 
 // resolveTarget resolves a target specification to agent, pane, and working directory.
@@ -180,12 +184,20 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 
 	// Rig target (auto-spawn polecat)
 	if rigName, isRig := IsRigName(target); isRig {
-		// Check if rig is parked or docked before dispatching (gt-4owfd.1, gt-11y)
+		// Resolve dispatch target: explicit --machine wins, otherwise policy decides.
 		townRoot := opts.TownRoot
 		if townRoot == "" {
 			townRoot, _ = workspace.FindFromCwd()
 		}
-		if townRoot != "" {
+		dispatchMachine, dispatchEntry, err := resolveDispatchMachineFn(townRoot, rigName, opts.Machine)
+		if err != nil {
+			return nil, fmt.Errorf("resolving dispatch machine: %w", err)
+		}
+
+		// Check if rig is parked or docked before dispatching (gt-4owfd.1, gt-11y)
+		// Skip docked check when dispatching to a satellite: the work runs on a
+		// remote machine, so the local rig's docked state is irrelevant.
+		if townRoot != "" && dispatchMachine == "" {
 			if blocked, reason := IsRigParkedOrDocked(townRoot, rigName); blocked {
 				undoCmd := "gt rig unpark"
 				if reason == "docked" {
@@ -201,12 +213,15 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			}
 		}
 		if opts.DryRun {
-			fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
+			if dispatchMachine != "" {
+				fmt.Printf("Would spawn satellite polecat in rig '%s' on machine '%s'\n", rigName, dispatchMachine)
+			} else {
+				fmt.Printf("Would spawn fresh polecat in rig '%s'\n", rigName)
+			}
 			result.Agent = fmt.Sprintf("%s/polecats/<new>", rigName)
 			result.Pane = "<new-pane>"
 			return result, nil
 		}
-		fmt.Printf("Target is rig '%s', spawning fresh polecat...\n", rigName)
 		spawnOpts := SlingSpawnOptions{
 			Force:      opts.Force,
 			Account:    opts.Account,
@@ -215,6 +230,39 @@ func resolveTarget(target string, opts ResolveTargetOptions) (*ResolvedTarget, e
 			Agent:      opts.Agent,
 			BaseBranch: opts.BaseBranch,
 		}
+
+		// Satellite dispatch: spawn on remote machine via proxy
+		if dispatchMachine != "" {
+			fmt.Printf("Target is rig '%s', dispatching to satellite '%s'...\n", rigName, dispatchMachine)
+			machines, err := loadMachinesConfig(townRoot)
+			if err != nil {
+				return nil, fmt.Errorf("loading machines config: %w", err)
+			}
+			satResult, err := spawnRemoteSatellite(machines, dispatchMachine, dispatchEntry, rigName)
+			if err != nil {
+				return nil, fmt.Errorf("satellite spawn: %w", err)
+			}
+			spawnInfo := &SpawnedPolecatInfo{
+				RigName:     satResult.RigName,
+				PolecatName: satResult.PolecatName,
+				SessionName: satResult.SessionName,
+				ClonePath:   satResult.ClonePath,
+				BaseBranch:  satResult.BaseBranch,
+				Branch:      satResult.Branch,
+				Pane:        "satellite", // Mark session as already started (remote tmux)
+				account:     opts.Account,
+				agent:       opts.Agent,
+			}
+			result.Agent = spawnInfo.AgentID()
+			result.NewPolecatInfo = spawnInfo
+			result.WorkDir = spawnInfo.ClonePath
+			result.HookSetAtomically = opts.HookBead != ""
+			result.DispatchMachine = dispatchMachine
+			result.DispatchEntry = dispatchEntry
+			return result, nil
+		}
+
+		fmt.Printf("Target is rig '%s', spawning fresh polecat...\n", rigName)
 		spawnInfo, err := spawnPolecatForSling(rigName, spawnOpts)
 		if err != nil {
 			return nil, fmt.Errorf("spawning polecat: %w", err)

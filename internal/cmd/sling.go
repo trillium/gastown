@@ -133,6 +133,7 @@ var (
 	slingRalph         bool   // --ralph: enable Ralph Wiggum loop mode for multi-step workflows
 	slingFormula       string // --formula: override formula for dispatch (default: mol-polecat-work)
 	slingCrew          string // --crew: target a crew member in the specified rig
+	slingMachine       string // --machine: dispatch to a specific satellite machine
 )
 
 func init() {
@@ -160,6 +161,7 @@ func init() {
 	slingCmd.Flags().BoolVar(&slingRalph, "ralph", false, "Enable Ralph Wiggum loop mode (fresh context per step, for multi-step workflows)")
 	slingCmd.Flags().StringVar(&slingFormula, "formula", "", "Formula to apply (default: mol-polecat-work for polecat targets)")
 	slingCmd.Flags().StringVar(&slingCrew, "crew", "", "Target a crew member in the specified rig (e.g., --crew mel with target gastown → gastown/crew/mel)")
+	slingCmd.Flags().StringVar(&slingMachine, "machine", "", "Dispatch to a specific satellite machine (from machines.json)")
 
 	slingCmd.AddCommand(slingRespawnResetCmd)
 	rootCmd.AddCommand(slingCmd)
@@ -362,6 +364,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Agent:       slingAgent,
 				HookRawBead: slingHookRawBead,
 				Ralph:       slingRalph,
+				Machine:     slingMachine,
 			})
 		}
 	}
@@ -401,6 +404,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 			Agent:       slingAgent,
 			HookRawBead: slingHookRawBead,
 			Ralph:       slingRalph,
+			Machine:     slingMachine,
 		})
 	}
 
@@ -437,6 +441,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 				Agent:       slingAgent,
 				HookRawBead: slingHookRawBead,
 				Ralph:       slingRalph,
+				Machine:     slingMachine,
 			})
 		}
 		// Non-rig target in deferred mode — reject to prevent bypassing capacity control
@@ -668,6 +673,7 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 		BeadID:     beadID,
 		TownRoot:   townRoot,
 		BaseBranch: slingBaseBranch,
+		Machine:    slingMachine,
 	})
 	if err != nil {
 		return err
@@ -970,15 +976,25 @@ func runSling(cmd *cobra.Command, args []string) (retErr error) {
 	// This ensures polecat sees the molecule when gt prime runs on session start.
 	freshlySpawned := newPolecatInfo != nil
 	if freshlySpawned {
-		pane, err := newPolecatInfo.StartSession()
-		if err != nil {
-			// Rollback: session failed, clean up zombie artifacts (worktree, hooked bead).
-			// Without rollback, next sling attempt fails with "bead already hooked" (gt-jn40ft).
-			fmt.Printf("%s Session failed, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), newPolecatInfo.PolecatName)
-			rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
-			return fmt.Errorf("starting polecat session: %w", err)
+		if resolved.DispatchMachine != "" {
+			// Satellite: launch agent in the remote tmux session
+			if err := startRemoteSatelliteSession(resolved.DispatchEntry, newPolecatInfo, beadID); err != nil {
+				fmt.Printf("%s Could not start remote session: %v, cleaning up...\n", style.Dim.Render("✗"), err)
+				rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
+				return fmt.Errorf("starting remote satellite session: %w", err)
+			}
+			fmt.Printf("  %s Remote session started for %s on %s\n", style.Bold.Render("▶"), newPolecatInfo.PolecatName, resolved.DispatchMachine)
+		} else {
+			pane, err := newPolecatInfo.StartSession()
+			if err != nil {
+				// Rollback: session failed, clean up zombie artifacts (worktree, hooked bead).
+				// Without rollback, next sling attempt fails with "bead already hooked" (gt-jn40ft).
+				fmt.Printf("%s Session failed, rolling back spawned polecat %s...\n", style.Warning.Render("⚠"), newPolecatInfo.PolecatName)
+				rollbackSlingArtifactsFn(newPolecatInfo, beadID, hookWorkDir, "")
+				return fmt.Errorf("starting polecat session: %w", err)
+			}
+			targetPane = pane
 		}
-		targetPane = pane
 	}
 
 	// Try to inject the "start now" prompt (graceful if no tmux)

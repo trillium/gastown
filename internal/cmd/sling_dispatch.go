@@ -23,6 +23,7 @@ type SlingParams struct {
 	RigName     string   // Target rig (always a rig for queue)
 
 	// CLI flag passthrough
+	Machine    string   // --machine (satellite target)
 	Args       string   // --args
 	Vars       []string // --var (key=value pairs)
 	Merge      string   // --merge (convoy strategy)
@@ -111,8 +112,18 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		BeadID: params.BeadID,
 	}
 
+	// Resolve dispatch machine early: needed for the docked-rig guard (step 0)
+	// and the spawn step (step 3). Explicit --machine wins; otherwise policy decides.
+	dispatchMachine, dispatchEntry, err := resolveDispatchMachineFn(townRoot, params.RigName, params.Machine)
+	if err != nil {
+		result.ErrMsg = err.Error()
+		return result, fmt.Errorf("resolving dispatch machine: %w", err)
+	}
+
 	// 0. Check if rig is parked or docked before dispatching (gt-4owfd.1, gt-11y)
-	if params.RigName != "" {
+	// Skip docked check when dispatching to a satellite: the work runs on a
+	// remote machine, so the local rig's docked state is irrelevant.
+	if params.RigName != "" && dispatchMachine == "" {
 		if blocked, reason := IsRigParkedOrDocked(townRoot, params.RigName); blocked {
 			result.ErrMsg = "rig " + reason
 			undoCmd := "gt rig unpark"
@@ -219,7 +230,7 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		}
 	}
 
-	// 3. Spawn polecat (via spawnPolecatForSling)
+	// 3. Spawn polecat (local or satellite)
 	spawnOpts := SlingSpawnOptions{
 		Force:      params.Force,
 		Account:    params.Account,
@@ -232,10 +243,40 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 		// the --create flag for non-rig targets via resolveTarget.
 		Create: true,
 	}
-	spawnInfo, err := spawnPolecatForSling(params.RigName, spawnOpts)
-	if err != nil {
-		result.ErrMsg = err.Error()
-		return result, fmt.Errorf("failed to spawn polecat: %w", err)
+
+	// Check for satellite dispatch: if --machine is set or dispatch policy
+	// selects a satellite, route to a remote machine instead of local spawn.
+	var spawnInfo *SpawnedPolecatInfo
+	if dispatchMachine != "" {
+		machines, err := loadMachinesConfig(townRoot)
+		if err != nil {
+			result.ErrMsg = err.Error()
+			return result, fmt.Errorf("loading machines config: %w", err)
+		}
+		satResult, err := spawnRemoteSatellite(machines, dispatchMachine, dispatchEntry, params.RigName)
+		if err != nil {
+			result.ErrMsg = err.Error()
+			return result, fmt.Errorf("satellite spawn: %w", err)
+		}
+		// Wrap satellite result into SpawnedPolecatInfo for downstream compatibility
+		spawnInfo = &SpawnedPolecatInfo{
+			RigName:     satResult.RigName,
+			PolecatName: satResult.PolecatName,
+			SessionName: satResult.SessionName,
+			ClonePath:   satResult.ClonePath,
+			BaseBranch:  satResult.BaseBranch,
+			Branch:      satResult.Branch,
+			Pane:        "satellite", // Mark session as already started (remote tmux)
+			account:     params.Account,
+			agent:       params.Agent,
+		}
+	} else {
+		var err error
+		spawnInfo, err = spawnPolecatForSling(params.RigName, spawnOpts)
+		if err != nil {
+			result.ErrMsg = err.Error()
+			return result, fmt.Errorf("failed to spawn polecat: %w", err)
+		}
 	}
 	result.SpawnInfo = spawnInfo
 	result.PolecatName = spawnInfo.PolecatName
@@ -357,15 +398,26 @@ func executeSling(params SlingParams) (*SlingResult, error) {
 	}
 
 	// 11. Start polecat session
-	pane, err := spawnInfo.StartSession()
-	if err != nil {
-		fmt.Printf("  %s Could not start session: %v, cleaning up partial state...\n", style.Dim.Render("✗"), err)
-		rollbackSlingArtifactsFn(spawnInfo, beadToHook, hookWorkDir, convoyID)
-		result.ErrMsg = fmt.Sprintf("session failed: %v", err)
-		return result, fmt.Errorf("starting polecat session: %w", err)
+	if dispatchMachine != "" {
+		// Satellite: launch agent in the remote tmux session
+		if err := startRemoteSatelliteSession(dispatchEntry, spawnInfo, beadToHook); err != nil {
+			fmt.Printf("  %s Could not start remote session: %v, cleaning up...\n", style.Dim.Render("✗"), err)
+			rollbackSlingArtifactsFn(spawnInfo, beadToHook, hookWorkDir, convoyID)
+			result.ErrMsg = fmt.Sprintf("remote session failed: %v", err)
+			return result, fmt.Errorf("starting remote satellite session: %w", err)
+		}
+		fmt.Printf("  %s Remote session started for %s on %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName, dispatchMachine)
+	} else {
+		pane, err := spawnInfo.StartSession()
+		if err != nil {
+			fmt.Printf("  %s Could not start session: %v, cleaning up partial state...\n", style.Dim.Render("✗"), err)
+			rollbackSlingArtifactsFn(spawnInfo, beadToHook, hookWorkDir, convoyID)
+			result.ErrMsg = fmt.Sprintf("session failed: %v", err)
+			return result, fmt.Errorf("starting polecat session: %w", err)
+		}
+		fmt.Printf("  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
+		_ = pane
 	}
-	fmt.Printf("  %s Session started for %s\n", style.Bold.Render("▶"), spawnInfo.PolecatName)
-	_ = pane
 
 	result.Success = true
 	return result, nil
