@@ -1532,8 +1532,9 @@ type MachinesConfig struct {
 	Version        int                      `json:"version"`         // schema version
 	Machines       map[string]*MachineEntry `json:"machines"`
 	DispatchPolicy string                   `json:"dispatch_policy"` // "round-robin"
-	DoltHost       string                   `json:"dolt_host"`      // Hub machine IP (Tailscale)
-	DoltPort       int                      `json:"dolt_port"`      // Hub Dolt port (default 3307)
+	DoltHost       string                   `json:"dolt_host"`       // Hub machine IP (Tailscale)
+	DoltPort       int                      `json:"dolt_port"`       // Hub Dolt port (default 3307)
+	ProxyPort      int                      `json:"proxy_port"`      // mTLS proxy port (default 9876)
 }
 
 // MachineEntry describes a single machine in the fleet.
@@ -1596,8 +1597,16 @@ func (mc *MachinesConfig) HubSSHTarget() string {
 	return mc.DoltHost
 }
 
+// proxyPort returns the configured proxy port, falling back to 9876.
+func (mc *MachinesConfig) proxyPort() int {
+	if mc.ProxyPort > 0 {
+		return mc.ProxyPort
+	}
+	return 9876
+}
+
 func (mc *MachinesConfig) ProxyURL(machineHost string) string {
-	port := 9876
+	port := mc.proxyPort()
 	if machineHost == mc.DoltHost {
 		return fmt.Sprintf("https://127.0.0.1:%d", port)
 	}
