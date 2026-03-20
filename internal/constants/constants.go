@@ -162,6 +162,13 @@ const (
 	FileMachinesJSON = "machines.json"
 )
 
+// Proxy configuration constants.
+const (
+	// DefaultProxyPort is the default mTLS proxy server port.
+	// Configurable per-town via machines.json proxy_port field.
+	DefaultProxyPort = 9876
+)
+
 // Beads configuration constants.
 const (
 	// BeadsCustomTypes is the comma-separated list of custom issue types that
