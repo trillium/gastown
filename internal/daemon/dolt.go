@@ -245,8 +245,9 @@ func (m *DoltServerManager) isRemote() bool {
 // the doltserver.buildDoltSQLCmd pattern for local-vs-remote command construction.
 func (m *DoltServerManager) buildDoltSQLCmd(ctx context.Context, args ...string) *exec.Cmd {
 	var fullArgs []string
-	fullArgs = append(fullArgs, "sql")
 
+	// --host, --port, --user, --no-tls are dolt GLOBAL args and must come
+	// BEFORE the "sql" subcommand (same pattern as doltserver.buildDoltSQLCmd).
 	if m.isRemote() {
 		host := m.config.Host
 		if host == "" {
@@ -264,6 +265,7 @@ func (m *DoltServerManager) buildDoltSQLCmd(ctx context.Context, args ...string)
 		)
 	}
 
+	fullArgs = append(fullArgs, "sql")
 	fullArgs = append(fullArgs, args...)
 	cmd := exec.CommandContext(ctx, "dolt", fullArgs...)
 
