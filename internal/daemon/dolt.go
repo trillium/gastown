@@ -273,7 +273,9 @@ func (m *DoltServerManager) buildDoltSQLCmd(ctx context.Context, args ...string)
 	// .doltcfg directories detected" or "Access denied" errors.
 	cmd.Dir = m.config.DataDir
 
-	if m.isRemote() && m.config.Password != "" {
+	if m.isRemote() {
+		// Always set DOLT_CLI_PASSWORD (even empty) to prevent dolt from attempting
+		// keychain/credential-file lookup, which fails with "operation not supported by device".
 		cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+m.config.Password)
 	}
 
