@@ -298,6 +298,18 @@ func AgentEnv(cfg AgentEnvConfig) map[string]string {
 		}
 	}
 
+	// Suppress bd's Dolt auto-start for all Gas Town agents (GH#2930).
+	// Gas Town manages its own Dolt server (gt dolt start/stop). When the
+	// server is momentarily unreachable (restart, journal hiccup), bd's
+	// auto-start tries to launch a shadow server in the agent's .beads/dolt/
+	// directory — which conflicts with the real server on the same port and
+	// triggers an escalation flood loop. Dogs are especially affected because
+	// their kennel's .beads/ has no explicit dolt_server_port in metadata.json.
+	if cfg.TownRoot != "" {
+		env["BEADS_DOLT_AUTO_START"] = "0"
+	}
+
+
 	// Propagate Dolt server host so bd doesn't fall back to 127.0.0.1 when
 	// the server runs on a remote machine (e.g., mini2 over Tailscale).
 	if _, ok := env["BEADS_DOLT_SERVER_HOST"]; !ok {
@@ -593,4 +605,19 @@ func EnvToSlice(env map[string]string) []string {
 		result = append(result, k+"="+v)
 	}
 	return result
+}
+
+// ClaudeConfigDir resolves the Claude Code configuration directory.
+// Resolution order:
+//  1. CLAUDE_CONFIG_DIR env var (if set and non-empty)
+//  2. $HOME/.claude (fallback)
+func ClaudeConfigDir() (string, error) {
+	if dir := os.Getenv("CLAUDE_CONFIG_DIR"); dir != "" {
+		return dir, nil
+	}
+	home, err := os.UserHomeDir()
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(home, ".claude"), nil
 }

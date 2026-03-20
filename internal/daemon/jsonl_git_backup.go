@@ -306,8 +306,9 @@ func (d *Daemon) exportTableToJsonl(table, query, dir, dataDir string) (int, err
 			"sql", "-r", "json", "-q", query)
 	} else {
 		cmd = exec.CommandContext(ctx, "dolt", "sql", "-r", "json", "-q", query)
-		cmd.Dir = dataDir
 	}
+	// Always set cmd.Dir to prevent stray .doltcfg/ creation (GH#2537).
+	cmd.Dir = dataDir
 
 	var stdout, stderr bytes.Buffer
 	cmd.Stdout = &stdout

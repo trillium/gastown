@@ -291,3 +291,70 @@ func TestCheckPolecatHealth_NotifiesWitnessOnCrash(t *testing.T) {
 		t.Errorf("expected witness address myr/witness, got: %q", invocations)
 	}
 }
+
+// TestCheckPolecatHealth_SkipsDonePolecat verifies that checkPolecatHealth does
+// NOT fire CRASHED_POLECAT when the agent_state is "done". This is the fix for
+// the duplicate RECOVERY_NEEDED flood (GH#2795): polecats that completed
+// normally should not trigger crash alerts just because the session is dead.
+func TestCheckPolecatHealth_SkipsDonePolecat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	bdPath := writeFakeTestBD(t, binDir, "done", "done", "gt-xyz", recentTime)
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if !strings.Contains(got, "agent_state=done") {
+		t.Errorf("expected log to mention agent_state=done, got: %q", got)
+	}
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("done polecat must not trigger CRASH DETECTED, got: %q", got)
+	}
+}
+
+// TestCheckPolecatHealth_SkipsNukedPolecat verifies that checkPolecatHealth
+// does NOT fire CRASHED_POLECAT when the agent_state is "nuked". Polecats
+// killed with `gt polecat nuke --force` are intentionally stopped (GH#2795).
+func TestCheckPolecatHealth_SkipsNukedPolecat(t *testing.T) {
+	if runtime.GOOS == "windows" {
+		t.Skip("test uses Unix shell script mocks for tmux and bd")
+	}
+	binDir := t.TempDir()
+	writeFakeTestTmux(t, binDir)
+	recentTime := time.Now().UTC().Format(time.RFC3339)
+	bdPath := writeFakeTestBD(t, binDir, "nuked", "nuked", "gt-xyz", recentTime)
+
+	t.Setenv("PATH", binDir+":"+os.Getenv("PATH"))
+
+	var logBuf strings.Builder
+	d := &Daemon{
+		config: &Config{TownRoot: t.TempDir()},
+		logger: log.New(&logBuf, "", 0),
+		tmux:   tmux.NewTmux(),
+		bdPath: bdPath,
+	}
+
+	d.checkPolecatHealth("myr", "mycat")
+
+	got := logBuf.String()
+	if !strings.Contains(got, "agent_state=nuked") {
+		t.Errorf("expected log to mention agent_state=nuked, got: %q", got)
+	}
+	if strings.Contains(got, "CRASH DETECTED") {
+		t.Errorf("nuked polecat must not trigger CRASH DETECTED, got: %q", got)
+	}
+}

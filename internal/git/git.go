@@ -1037,6 +1037,13 @@ func (g *Git) ResetHard(ref string) error {
 	return err
 }
 
+// CleanForce removes untracked files and directories from the working tree.
+// Excludes .runtime/ to preserve agent lock files and session state.
+func (g *Git) CleanForce() error {
+	_, err := g.run("clean", "-fd", "--exclude=.runtime")
+	return err
+}
+
 // Rev returns the commit hash for the given ref.
 func (g *Git) Rev(ref string) (string, error) {
 	return g.run("rev-parse", ref)

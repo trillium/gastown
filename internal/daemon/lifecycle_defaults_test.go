@@ -36,8 +36,15 @@ func TestDefaultLifecycleConfig(t *testing.T) {
 	if p.CompactorDog == nil || !p.CompactorDog.Enabled {
 		t.Error("expected compactor_dog to be enabled")
 	}
-	if p.CompactorDog.Threshold != 500 {
-		t.Errorf("expected compactor_dog threshold 500, got %d", p.CompactorDog.Threshold)
+	if p.CompactorDog.Threshold != 2000 {
+		t.Errorf("expected compactor_dog threshold 2000, got %d", p.CompactorDog.Threshold)
+	}
+
+	if p.CheckpointDog == nil || !p.CheckpointDog.Enabled {
+		t.Error("expected checkpoint_dog to be enabled")
+	}
+	if p.CheckpointDog.IntervalStr != "10m" {
+		t.Errorf("expected checkpoint_dog interval 10m, got %s", p.CheckpointDog.IntervalStr)
 	}
 
 	if p.DoctorDog == nil || !p.DoctorDog.Enabled {
@@ -88,6 +95,9 @@ func TestEnsureLifecycleDefaults_EmptyConfig(t *testing.T) {
 	if config.Patrols.CompactorDog == nil || !config.Patrols.CompactorDog.Enabled {
 		t.Error("expected compactor_dog to be set")
 	}
+	if config.Patrols.CheckpointDog == nil || !config.Patrols.CheckpointDog.Enabled {
+		t.Error("expected checkpoint_dog to be set")
+	}
 	if config.Patrols.Handler == nil || !config.Patrols.Handler.Enabled {
 		t.Error("expected handler to be set")
 	}
@@ -137,9 +147,10 @@ func TestEnsureLifecycleDefaults_FullyConfigured(t *testing.T) {
 		Type:    "daemon-patrol-config",
 		Version: 1,
 		Patrols: &PatrolsConfig{
-			WispReaper:   &WispReaperConfig{Enabled: false},
-			CompactorDog: &CompactorDogConfig{Enabled: false},
-			DoctorDog:    &DoctorDogConfig{Enabled: false},
+			WispReaper:           &WispReaperConfig{Enabled: false},
+			CompactorDog:         &CompactorDogConfig{Enabled: false},
+			CheckpointDog:        &CheckpointDogConfig{Enabled: false},
+			DoctorDog:            &DoctorDogConfig{Enabled: false},
 			JsonlGitBackup:       &JsonlGitBackupConfig{Enabled: false},
 			DoltBackup:           &DoltBackupConfig{Enabled: false},
 			ScheduledMaintenance: &ScheduledMaintenanceConfig{Enabled: false, Threshold: &threshold},
@@ -313,6 +324,9 @@ func TestEnsureLifecycleConfigFile_ProductionScenario(t *testing.T) {
 	}
 	if config.Patrols.CompactorDog == nil || !config.Patrols.CompactorDog.Enabled {
 		t.Error("expected compactor_dog to be auto-populated and enabled")
+	}
+	if config.Patrols.CheckpointDog == nil || !config.Patrols.CheckpointDog.Enabled {
+		t.Error("expected checkpoint_dog to be auto-populated and enabled")
 	}
 	if config.Patrols.DoctorDog == nil || !config.Patrols.DoctorDog.Enabled {
 		t.Error("expected doctor_dog to be auto-populated and enabled")

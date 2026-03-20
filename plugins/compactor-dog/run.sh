@@ -22,7 +22,7 @@ set -euo pipefail
 DOLT_HOST="${DOLT_HOST:-127.0.0.1}"
 DOLT_PORT="${DOLT_PORT:-3307}"
 DOLT_USER="${DOLT_USER:-root}"
-COMMIT_THRESHOLD="${COMMIT_THRESHOLD:-500}"
+COMMIT_THRESHOLD="${COMMIT_THRESHOLD:-2000}"
 # Default: auto-discover production databases via SHOW DATABASES.
 # Override with --databases db1,db2,... for an explicit list.
 DEFAULT_DBS="auto"
@@ -41,7 +41,7 @@ while [[ $# -gt 0 ]]; do
     --check-only)  CHECK_ONLY=true; shift ;;
     --help|-h)
       echo "Usage: $0 [--threshold N] [--databases db1,db2,...] [--dry-run] [--check-only]"
-      echo "  --threshold N        Commit count before compaction (default: 500)"
+      echo "  --threshold N        Commit count before compaction (default: 2000)"
       echo "  --databases db1,...  Comma-separated database list (default: auto-discover)"
       echo "  --dry-run            Report only, don't compact"
       echo "  --check-only         Monitor and report only (no compaction)"
@@ -273,10 +273,11 @@ for entry in "${CANDIDATES[@]}"; do
     HAS_REMOTE=true
     log "  Remote detected ('$REMOTE_NAME'). Fetching to check for divergence..."
     if ! dolt_exec "$DB" "CALL DOLT_FETCH('$REMOTE_NAME')"; then
-      log "  ERROR: Fetch from remote failed for $DB — skipping compaction to avoid data loss"
-      ERRORS=$((ERRORS + 1))
-      ERROR_DETAILS="${ERROR_DETAILS}${DB}: remote fetch failed (skipped to avoid divergence)\n"
-      continue
+      # Fetch timeout/failure is a warning, not a blocker. For local-source-of-truth
+      # databases (hq/bd/gt), the local data IS the authority — we compact and
+      # force-push. Aborting on fetch failure causes the escalation feedback loop:
+      # timeout → abort → escalate → more commits → slower fetch → repeat.
+      log "  WARNING: Fetch from remote failed for $DB — proceeding with compaction (local is source of truth)"
     fi
     # Verify local HEAD is at or ahead of remote HEAD.
     # If remote has commits we don't have, compaction would lose them.
@@ -325,9 +326,18 @@ for entry in "${CANDIDATES[@]}"; do
   fi
 
   # Step 3d: Commit all data as a single commit.
+  # "nothing to commit" is valid when soft-reset lands on identical data
+  # (e.g., only commit metadata changed, not table content). dolt_exec
+  # sends stderr to LOGFILE, so check LOGFILE for the "nothing to commit"
+  # message when the command fails.
   COMMIT_MSG="compaction: flatten history to single commit"
   log "  Committing flattened data..."
   if ! dolt_exec "$DB" "CALL DOLT_COMMIT('-Am', '$COMMIT_MSG')"; then
+    if grep -q "nothing to commit" "$LOGFILE" 2>/dev/null; then
+      log "  Nothing to commit (data unchanged) — compaction is a no-op, skipping"
+      SKIPPED+=("$DB (nothing to commit)")
+      continue
+    fi
     log "  ERROR: Flatten commit failed for $DB"
     ERRORS=$((ERRORS + 1))
     ERROR_DETAILS="${ERROR_DETAILS}${DB}: commit failed\n"
@@ -396,9 +406,10 @@ for entry in "${CANDIDATES[@]}"; do
   # Step 5b: Push compacted history to remote to maintain sync.
   # This MUST be a force-push because flatten rewrites the commit graph.
   # Safe here because: (1) we pulled first, (2) integrity is verified.
+  # Use --set-upstream because flatten loses branch tracking metadata.
   if $HAS_REMOTE; then
     log "  Pushing compacted history to remote ('$REMOTE_NAME')..."
-    if ! dolt_exec "$DB" "CALL DOLT_PUSH('--force', '$REMOTE_NAME')"; then
+    if ! dolt_exec "$DB" "CALL DOLT_PUSH('--force', '--set-upstream', '$REMOTE_NAME', 'main')"; then
       log "  WARNING: Force-push to remote failed for $DB"
       log "  Remote will be out of sync — manual 'dolt push --force' may be needed"
       ERROR_DETAILS="${ERROR_DETAILS}${DB}: force-push failed (local compacted, remote diverged)\n"

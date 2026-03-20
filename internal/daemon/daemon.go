@@ -474,6 +474,18 @@ func (d *Daemon) Run() error {
 		d.logger.Printf("Compactor dog ticker started (interval %v)", interval)
 	}
 
+	// Start checkpoint dog ticker if configured.
+	// Auto-commits WIP changes in active polecat worktrees to prevent data loss.
+	var checkpointDogTicker *time.Ticker
+	var checkpointDogChan <-chan time.Time
+	if IsPatrolEnabled(d.patrolConfig, "checkpoint_dog") {
+		interval := checkpointDogInterval(d.patrolConfig)
+		checkpointDogTicker = time.NewTicker(interval)
+		checkpointDogChan = checkpointDogTicker.C
+		defer checkpointDogTicker.Stop()
+		d.logger.Printf("Checkpoint dog ticker started (interval %v)", interval)
+	}
+
 	// Start scheduled maintenance ticker if configured.
 	// Checks periodically whether we're in the maintenance window and
 	// runs `gt maintain --force` when commit counts exceed threshold.
@@ -566,6 +578,13 @@ func (d *Daemon) Run() error {
 			// Reclaims commit graph storage, then runs gc to reclaim chunks.
 			if !d.isShutdownInProgress() {
 				d.runCompactorDog()
+			}
+
+		case <-checkpointDogChan:
+			// Checkpoint dog — auto-commits WIP changes in active polecat
+			// worktrees to prevent data loss from session crashes.
+			if !d.isShutdownInProgress() {
+				d.runCheckpointDog()
 			}
 
 		case <-scheduledMaintenanceChan:
@@ -1986,6 +2005,18 @@ func (d *Daemon) checkPolecatHealth(rigName, polecatName string) {
 				rigName, polecatName)
 			return
 		}
+	}
+
+	// Terminal state guard: skip polecats that have completed or been nuked (GH#2795).
+	// A polecat in agent_state=done or agent_state=nuked has shut down intentionally.
+	// The session being dead is expected — the daemon should NOT fire CRASHED_POLECAT.
+	// Without this, every heartbeat cycle floods the witness with duplicate
+	// RECOVERY_NEEDED alerts for completed/nuked polecats.
+	agentState := beads.AgentState(info.State)
+	if agentState == beads.AgentStateDone || agentState == beads.AgentStateNuked {
+		d.logger.Printf("Skipping crash detection for %s/%s: agent_state=%s (session shutdown expected)",
+			rigName, polecatName, info.State)
+		return
 	}
 
 	// TOCTOU guard: re-verify session is still dead before restarting.
