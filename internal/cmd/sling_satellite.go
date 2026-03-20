@@ -445,6 +445,8 @@ tmux setenv -t "$SESS" GT_PROXY_CERT "$CERT_DIR/cert.pem"
 tmux setenv -t "$SESS" GT_PROXY_KEY "$CERT_DIR/key.pem"
 tmux setenv -t "$SESS" GT_PROXY_CA "$CERT_DIR/ca.pem"
 tmux setenv -t "$SESS" GT_REAL_BIN "$HOME/.local/bin/gt.real"
+tmux setenv -t "$SESS" GT_DOLT_HOST "%s"
+tmux setenv -t "$SESS" GT_DOLT_PORT "%d"
 
 # Output merged session info as JSON
 printf '%%s' "$SPAWN_JSON" | jq -c --arg sess "$SESS" --arg cert_dir "$CERT_DIR" '. + {session_name: $sess, cert_dir: $cert_dir}'
@@ -453,6 +455,7 @@ printf '%%s' "$SPAWN_JSON" | jq -c --arg sess "$SESS" --arg cert_dir "$CERT_DIR"
 		gtBinary, rigName, polecatName, doltHost, doltPort,
 		rigName, polecatName,
 		proxyURL,
+		doltHost, doltPort,
 	)
 }
 
