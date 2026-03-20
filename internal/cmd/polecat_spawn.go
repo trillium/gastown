@@ -8,6 +8,7 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"time"
 
@@ -509,6 +510,8 @@ This command is primarily used by the satellite bootstrap sequence
 				"clone_path":   info.ClonePath,
 				"base_branch":  info.BaseBranch,
 				"branch":       info.Branch,
+				"dolt_host":    polecatSpawnDoltHost,
+				"dolt_port":    strconv.Itoa(polecatSpawnDoltPort),
 			}
 			enc := json.NewEncoder(os.Stdout)
 			return enc.Encode(out)
