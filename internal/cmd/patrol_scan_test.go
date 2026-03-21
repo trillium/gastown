@@ -2,8 +2,13 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
+	"os"
+	"path/filepath"
 	"testing"
+	"time"
 
+	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/witness"
 )
 
@@ -133,5 +138,122 @@ func TestPatrolScanZombieItemSerialization(t *testing.T) {
 	}
 	if parsed.Error != "restart failed: tmux error" {
 		t.Errorf("Error = %q, want %q", parsed.Error, "restart failed: tmux error")
+	}
+}
+
+// --- scanSatellites tests (gt-0li) ---
+
+// writeTempMachinesJSON creates a temp town root with machines.json for testing.
+func writeTempMachinesJSON(t *testing.T, machines map[string]*config.MachineEntry) string {
+	t.Helper()
+	dir := t.TempDir()
+	mayorDir := filepath.Join(dir, "mayor")
+	if err := os.MkdirAll(mayorDir, 0o755); err != nil {
+		t.Fatal(err)
+	}
+	cfg := &config.MachinesConfig{
+		Type:     "machines",
+		Version:  1,
+		DoltHost: "10.0.0.1",
+		DoltPort: 3307,
+		Machines: machines,
+	}
+	data, err := json.Marshal(cfg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(filepath.Join(mayorDir, "machines.json"), data, 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return dir
+}
+
+func TestScanSatellites_HappyPath(t *testing.T) {
+	scanJSON := `{"rig":"gastown","timestamp":"2026-03-20T12:00:00Z","zombies":{"checked":2,"found":0,"zombies":[]}}`
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return scanJSON, nil
+	})
+
+	townRoot := writeTempMachinesJSON(t, map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	results := scanSatellites(townRoot)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Machine != "m1" {
+		t.Errorf("machine = %q, want %q", results[0].Machine, "m1")
+	}
+	if results[0].Error != "" {
+		t.Errorf("unexpected error: %s", results[0].Error)
+	}
+	if results[0].Scan == nil {
+		t.Fatal("expected non-nil scan result")
+	}
+	if results[0].Scan.Zombies.Checked != 2 {
+		t.Errorf("zombies checked = %d, want 2", results[0].Scan.Zombies.Checked)
+	}
+}
+
+func TestScanSatellites_PartialFailure(t *testing.T) {
+	scanJSON := `{"rig":"gastown","timestamp":"2026-03-20T12:00:00Z","zombies":{"checked":1,"found":0,"zombies":[]}}`
+	withMockSSH(t, func(target, _ string, _ time.Duration) (string, error) {
+		if target == "u@10.0.0.3" {
+			return "", fmt.Errorf("connection refused")
+		}
+		return scanJSON, nil
+	})
+
+	townRoot := writeTempMachinesJSON(t, map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+		"m2": {Host: "10.0.0.3", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	results := scanSatellites(townRoot)
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	var succeeded, errored int
+	for _, r := range results {
+		if r.Error != "" {
+			errored++
+		} else if r.Scan != nil {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || errored != 1 {
+		t.Errorf("expected 1 success + 1 error, got %d success + %d error", succeeded, errored)
+	}
+}
+
+func TestScanSatellites_InvalidJSON(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "not json", nil
+	})
+
+	townRoot := writeTempMachinesJSON(t, map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	results := scanSatellites(townRoot)
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Error == "" {
+		t.Error("expected error for invalid JSON")
+	}
+	if results[0].Scan != nil {
+		t.Error("scan should be nil for invalid JSON")
+	}
+}
+
+func TestScanSatellites_NoMachinesConfig(t *testing.T) {
+	// No machines.json → single-machine setup → returns nil
+	dir := t.TempDir()
+	results := scanSatellites(dir)
+	if results != nil {
+		t.Errorf("expected nil for missing machines config, got %d results", len(results))
 	}
 }
