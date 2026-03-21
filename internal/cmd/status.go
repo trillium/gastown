@@ -929,12 +929,18 @@ func gatherStatus() (TownStatus, error) {
 	return status, nil
 }
 
+// Test seams for discoverLiveSessions — swap in tests to avoid real tmux calls.
+var (
+	tmuxListSessionsFn = func(t *tmux.Tmux) ([]string, error) { return t.ListSessions() }
+	tmuxIsAgentAliveFn = func(t *tmux.Tmux, name string) bool { return t.IsAgentAlive(name) }
+)
+
 // discoverLiveSessions pre-fetches all tmux sessions and verifies agent liveness.
 // A Gas Town session is only considered "running" if the agent process is alive
 // inside it, not merely if the tmux session exists. See: gt-bd6i3
 func discoverLiveSessions(t *tmux.Tmux) map[string]bool {
 	allSessions := make(map[string]bool)
-	sessions, err := t.ListSessions()
+	sessions, err := tmuxListSessionsFn(t)
 	if err != nil {
 		return allSessions
 	}
@@ -945,7 +951,7 @@ func discoverLiveSessions(t *tmux.Tmux) map[string]bool {
 			wg.Add(1)
 			go func(name string) {
 				defer wg.Done()
-				alive := t.IsAgentAlive(name)
+				alive := tmuxIsAgentAliveFn(t, name)
 				mu.Lock()
 				allSessions[name] = alive
 				mu.Unlock()

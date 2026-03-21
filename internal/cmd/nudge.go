@@ -561,24 +561,34 @@ func identifyNudgeSender() string {
 	}
 }
 
+// Test seams for deliverNudgeLocalOrRemote — swap in tests to avoid tmux/SSH/ACP calls.
+var (
+	hasACPSessionFn        = hasACPSessionByName
+	tmuxHasSessionFn       = func(t *tmux.Tmux, name string) bool { exists, _ := t.HasSession(name); return exists }
+	resolveSessionFn       = resolveSessionMachine
+	nudgeRemoteFn          = nudgeRemote
+	deliverNudgeFn         = deliverNudge
+	logNudgeFn      func(townRoot, sessionName, message string) = func(townRoot, sessionName, message string) { _ = LogNudge(townRoot, sessionName, message) }
+)
+
 // deliverNudgeLocalOrRemote checks if a session exists locally (ACP or tmux), falls back to
 // remote satellite delivery, and handles logging.
 func deliverNudgeLocalOrRemote(t *tmux.Tmux, townRoot, sessionName, displayName, rigName, message, sender string) error {
-	isLocal := hasACPSessionByName(townRoot, sessionName)
+	isLocal := hasACPSessionFn(townRoot, sessionName)
 	if !isLocal {
-		if exists, _ := t.HasSession(sessionName); exists {
+		if tmuxHasSessionFn(t, sessionName) {
 			isLocal = true
 		}
 	}
 
 	if !isLocal {
 		if townRoot != "" {
-			if remoteMachine, err := resolveSessionMachine(townRoot, sessionName); err == nil {
-				if err := nudgeRemote(remoteMachine, sessionName, message, sender); err != nil {
+			if remoteMachine, err := resolveSessionFn(townRoot, sessionName); err == nil {
+				if err := nudgeRemoteFn(remoteMachine, sessionName, message, sender); err != nil {
 					return fmt.Errorf("remote nudge on %s: %w", remoteMachine, err)
 				}
 				fmt.Printf("%s Nudged %s on %s (%s)\n", style.Bold.Render("✓"), displayName, remoteMachine, nudgeModeFlag)
-				_ = LogNudge(townRoot, sessionName, message)
+				logNudgeFn(townRoot, sessionName, message)
 				_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, sessionName, message))
 				return nil
 			}
@@ -586,12 +596,12 @@ func deliverNudgeLocalOrRemote(t *tmux.Tmux, townRoot, sessionName, displayName,
 		return fmt.Errorf("session %q not found locally or on any satellite machine", sessionName)
 	}
 
-	if err := deliverNudge(t, sessionName, message, sender); err != nil {
+	if err := deliverNudgeFn(t, sessionName, message, sender); err != nil {
 		return fmt.Errorf("nudging session: %w", err)
 	}
 	fmt.Printf("%s Nudged %s (%s)\n", style.Bold.Render("✓"), displayName, nudgeModeFlag)
 	if tw, err := workspace.FindFromCwd(); err == nil && tw != "" {
-		_ = LogNudge(tw, sessionName, message)
+		logNudgeFn(tw, sessionName, message)
 	}
 	_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, sessionName, message))
 	return nil
