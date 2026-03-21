@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"testing"
@@ -322,5 +323,97 @@ func TestGetClaudeProjectDir_RespectsEnvVar(t *testing.T) {
 	want := filepath.Join(customDir, "projects", "-some-work-dir")
 	if got != want {
 		t.Errorf("getClaudeProjectDir() = %q, want %q", got, want)
+	}
+}
+
+// --- mergeSatelliteCosts tests (gt-91j) ---
+
+func TestMergeSatelliteCosts_MultiMachine(t *testing.T) {
+	results := []SatelliteResult{
+		{
+			Machine: "m1",
+			Output:  `{"sessions":[{"session":"gt-Toast","role":"polecat","cost_usd":1.50}],"total_usd":1.50}`,
+		},
+		{
+			Machine: "m2",
+			Output:  `{"sessions":[{"session":"gt-Butter","role":"polecat","cost_usd":2.25}],"total_usd":2.25}`,
+		},
+	}
+
+	costs, total := mergeSatelliteCosts(results)
+	if len(costs) != 2 {
+		t.Fatalf("expected 2 costs, got %d", len(costs))
+	}
+	if total != 3.75 {
+		t.Errorf("total = %f, want 3.75", total)
+	}
+	// Session names should be prefixed with machine
+	for _, c := range costs {
+		if c.Session[:1] != "[" {
+			t.Errorf("session %q should be prefixed with [machine]", c.Session)
+		}
+	}
+}
+
+func TestMergeSatelliteCosts_SkipsErrors(t *testing.T) {
+	results := []SatelliteResult{
+		{
+			Machine: "m1",
+			Output:  `{"sessions":[{"session":"gt-Toast","role":"polecat","cost_usd":1.00}],"total_usd":1.00}`,
+		},
+		{
+			Machine: "m2",
+			Err:     fmt.Errorf("connection refused"),
+		},
+	}
+
+	costs, total := mergeSatelliteCosts(results)
+	if len(costs) != 1 {
+		t.Fatalf("expected 1 cost (error skipped), got %d", len(costs))
+	}
+	if total != 1.00 {
+		t.Errorf("total = %f, want 1.00", total)
+	}
+}
+
+func TestMergeSatelliteCosts_SkipsInvalidJSON(t *testing.T) {
+	results := []SatelliteResult{
+		{Machine: "m1", Output: "not json"},
+		{Machine: "m2", Output: `{"sessions":[],"total_usd":0}`},
+	}
+
+	costs, total := mergeSatelliteCosts(results)
+	if len(costs) != 0 {
+		t.Errorf("expected 0 costs, got %d", len(costs))
+	}
+	if total != 0 {
+		t.Errorf("total = %f, want 0", total)
+	}
+}
+
+func TestMergeSatelliteCosts_Empty(t *testing.T) {
+	costs, total := mergeSatelliteCosts(nil)
+	if len(costs) != 0 {
+		t.Errorf("expected 0 costs, got %d", len(costs))
+	}
+	if total != 0 {
+		t.Errorf("total = %f, want 0", total)
+	}
+}
+
+func TestMergeSatelliteCosts_SessionTagging(t *testing.T) {
+	results := []SatelliteResult{
+		{
+			Machine: "mini2",
+			Output:  `{"sessions":[{"session":"gt-Toast","role":"polecat","cost_usd":1.00}],"total_usd":1.00}`,
+		},
+	}
+
+	costs, _ := mergeSatelliteCosts(results)
+	if len(costs) != 1 {
+		t.Fatal("expected 1 cost")
+	}
+	if costs[0].Session != "[mini2] gt-Toast" {
+		t.Errorf("session = %q, want %q", costs[0].Session, "[mini2] gt-Toast")
 	}
 }

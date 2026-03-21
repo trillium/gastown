@@ -315,6 +315,13 @@ func collectSatelliteCosts() ([]SessionCost, float64) {
 		return gtBin + " costs --json"
 	}, 15*time.Second)
 
+	return mergeSatelliteCosts(results)
+}
+
+// mergeSatelliteCosts aggregates cost results from multiple satellites.
+// Sessions are prefixed with [machine] for identification. Errors and
+// unparseable results are silently skipped.
+func mergeSatelliteCosts(results []SatelliteResult) ([]SessionCost, float64) {
 	var allCosts []SessionCost
 	var allTotal float64
 	for _, r := range results {
