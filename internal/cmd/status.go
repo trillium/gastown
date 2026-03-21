@@ -1040,41 +1040,61 @@ func prefetchAgentBeads(townRoot string, rigs []*rig.Rig) (map[string]*beads.Iss
 	return allAgentBeads, allHookBeads
 }
 
+// Test seams for gatherServiceStatus — swap in tests to avoid real process/socket checks.
+var (
+	daemonIsRunningFn    = func(townRoot string) (bool, int, error) { return daemon.IsRunning(townRoot) }
+	gatherDoltStatusFn   = gatherDoltStatus
+	gatherTmuxStatusFn   = gatherTmuxStatus
+	gatherACPStatusFn    = gatherACPStatus
+)
+
 // gatherServiceStatus populates daemon, dolt, tmux, and ACP service info on the status.
 func gatherServiceStatus(status *TownStatus, townRoot string, allSessions map[string]bool) {
 	// Daemon
-	if daemonRunning, daemonPid, err := daemon.IsRunning(townRoot); err == nil {
+	if daemonRunning, daemonPid, err := daemonIsRunningFn(townRoot); err == nil {
 		status.Daemon = &ServiceInfo{Running: daemonRunning, PID: daemonPid}
 	}
 
 	// Dolt
-	doltCfg := doltserver.DefaultConfig(townRoot)
-	if doltCfg.IsRemote() {
-		status.Dolt = &DoltInfo{Remote: true, Port: doltCfg.Port}
-	} else {
-		doltRunning, doltPid, _ := doltserver.IsRunning(townRoot)
-		port := doltCfg.Port
-		if doltRunning {
-			if state, err := doltserver.LoadState(townRoot); err == nil && state.Port > 0 {
-				port = state.Port
-			}
-		}
-		doltInfo := &DoltInfo{
-			Running: doltRunning,
-			PID:     doltPid,
-			Port:    port,
-			DataDir: doltCfg.DataDir,
-		}
-		if !doltRunning {
-			if conflictPid, conflictDir := doltserver.CheckPortConflict(townRoot); conflictPid > 0 {
-				doltInfo.PortConflict = true
-				doltInfo.ConflictOwner = conflictDir
-			}
-		}
-		status.Dolt = doltInfo
-	}
+	status.Dolt = gatherDoltStatusFn(townRoot)
 
 	// Tmux
+	status.Tmux = gatherTmuxStatusFn(allSessions)
+
+	// ACP
+	status.ACP = gatherACPStatusFn(townRoot)
+}
+
+// gatherDoltStatus checks local or remote Dolt server status.
+func gatherDoltStatus(townRoot string) *DoltInfo {
+	doltCfg := doltserver.DefaultConfig(townRoot)
+	if doltCfg.IsRemote() {
+		return &DoltInfo{Remote: true, Port: doltCfg.Port}
+	}
+	doltRunning, doltPid, _ := doltserver.IsRunning(townRoot)
+	port := doltCfg.Port
+	if doltRunning {
+		if state, err := doltserver.LoadState(townRoot); err == nil && state.Port > 0 {
+			port = state.Port
+		}
+	}
+	doltInfo := &DoltInfo{
+		Running: doltRunning,
+		PID:     doltPid,
+		Port:    port,
+		DataDir: doltCfg.DataDir,
+	}
+	if !doltRunning {
+		if conflictPid, conflictDir := doltserver.CheckPortConflict(townRoot); conflictPid > 0 {
+			doltInfo.PortConflict = true
+			doltInfo.ConflictOwner = conflictDir
+		}
+	}
+	return doltInfo
+}
+
+// gatherTmuxStatus checks tmux socket and session state.
+func gatherTmuxStatus(allSessions map[string]bool) *TmuxInfo {
 	socket := tmux.GetDefaultSocket()
 	socketLabel := "default"
 	if socket != "" {
@@ -1090,13 +1110,16 @@ func gatherServiceStatus(status *TownStatus, townRoot string, allSessions map[st
 		tmuxInfo.Running = true
 		tmuxInfo.PID = tmux.NewTmux().ServerPID()
 	}
-	status.Tmux = tmuxInfo
+	return tmuxInfo
+}
 
-	// ACP
+// gatherACPStatus checks if ACP (Agent Communication Protocol) mayor is active.
+func gatherACPStatus(townRoot string) *ServiceInfo {
 	if mayor.IsACPActive(townRoot) {
 		acpPid, _ := mayor.GetACPPid(townRoot)
-		status.ACP = &ServiceInfo{Running: true, PID: acpPid}
+		return &ServiceInfo{Running: true, PID: acpPid}
 	}
+	return nil
 }
 
 func outputStatusJSON(status TownStatus) error {
