@@ -4,8 +4,11 @@ import (
 	"fmt"
 	"strconv"
 	"strings"
+	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -61,8 +64,38 @@ func runPeek(cmd *cobra.Command, args []string) error {
 		lines = n
 	}
 
-	// Handle town-level agents: mayor, deacon, boot
-	// These use session names like "hq-mayor", "hq-deacon" but have no rig.
+	// Resolve address to tmux session name.
+	sessionName, err := resolveToSessionName(address)
+	if err != nil {
+		return err
+	}
+
+	// Try local capture first.
+	t := tmux.NewTmux()
+	output, err := t.CapturePane(sessionName, lines)
+	if err == nil {
+		fmt.Print(output)
+		return nil
+	}
+
+	// Local failed — try remote machines.
+	townRoot, twErr := workspace.FindFromCwdOrError()
+	if twErr != nil {
+		return fmt.Errorf("capturing output: %w (not in a Gas Town workspace for remote fallback)", err)
+	}
+	output, remoteErr := peekRemote(townRoot, sessionName, lines)
+	if remoteErr != nil {
+		// Return the original local error — remote was a fallback
+		return fmt.Errorf("capturing output: %w", err)
+	}
+
+	fmt.Print(output)
+	return nil
+}
+
+// resolveToSessionName converts a peek address to a tmux session name.
+func resolveToSessionName(address string) (string, error) {
+	// Town-level agents: mayor, deacon, boot
 	townAgentSessions := map[string]string{
 		"mayor":     "hq-mayor",
 		"hq/mayor":  "hq-mayor",
@@ -72,51 +105,46 @@ func runPeek(cmd *cobra.Command, args []string) error {
 		"hq/boot":   "hq-boot",
 	}
 	if sessionName, ok := townAgentSessions[address]; ok {
-		_, err := workspace.FindFromCwdOrError()
-		if err != nil {
-			return fmt.Errorf("not in a Gas Town workspace: %w", err)
-		}
-		t := tmux.NewTmux()
-		output, err := t.CapturePane(sessionName, lines)
-		if err != nil {
-			return fmt.Errorf("capturing %s: %w", address, err)
-		}
-		fmt.Print(output)
-		return nil
+		return sessionName, nil
 	}
 
 	rigName, polecatName, err := parseAddress(address)
 	if err != nil {
 		if !strings.Contains(address, "/") {
-			return fmt.Errorf("not in a rig directory. Use full address format: gt peek <rig>/<polecat>")
+			return "", fmt.Errorf("not in a rig directory. Use full address format: gt peek <rig>/<polecat>")
 		}
-		return err
+		return "", err
 	}
 
-	mgr, _, err := getSessionManager(rigName)
-	if err != nil {
-		if !strings.Contains(address, "/") {
-			return fmt.Errorf("not in a rig directory. Use full address format: gt peek <rig>/<polecat>")
-		}
-		return err
-	}
-
-	var output string
-
-	// Handle crew/ prefix for cross-rig crew workers
-	// e.g., "beads/crew/dave" -> session name "gt-beads-crew-dave"
+	rigPrefix := session.PrefixFor(rigName)
 	if strings.HasPrefix(polecatName, "crew/") {
 		crewName := strings.TrimPrefix(polecatName, "crew/")
-		sessionID := session.CrewSessionName(session.PrefixFor(rigName), crewName)
-		output, err = mgr.CaptureSession(sessionID, lines)
-	} else {
-		output, err = mgr.Capture(polecatName, lines)
+		return session.CrewSessionName(rigPrefix, crewName), nil
 	}
+	return session.PolecatSessionName(rigPrefix, polecatName), nil
+}
 
+// peekRemote captures pane output from a session on a satellite machine.
+func peekRemote(townRoot, sessionName string, lines int) (string, error) {
+	machinesPath := constants.MayorMachinesPath(townRoot)
+	machines, err := config.LoadMachinesConfig(machinesPath)
 	if err != nil {
-		return fmt.Errorf("capturing output: %w", err)
+		return "", err
 	}
 
-	fmt.Print(output)
-	return nil
+	// Find which machine has this session.
+	for _, rs := range listAllRemoteSessions(machines) {
+		if rs.RawName != sessionName {
+			continue
+		}
+		entry := machines.Machines[rs.Machine]
+		if entry == nil {
+			continue
+		}
+		remoteCmd := fmt.Sprintf("tmux -L gt capture-pane -p -t %s -S -%d",
+			config.ShellQuote(sessionName), lines)
+		return runSSH(entry.SSHTarget(), remoteCmd, 15*time.Second)
+	}
+
+	return "", fmt.Errorf("session %q not found on any satellite machine", sessionName)
 }
