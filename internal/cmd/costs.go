@@ -12,7 +12,6 @@ import (
 	"regexp"
 	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -312,47 +311,26 @@ func collectSatelliteCosts() ([]SessionCost, float64) {
 		return nil, 0
 	}
 
-	type result struct {
-		costs []SessionCost
-		total float64
-	}
+	results := runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " costs --json"
+	}, 15*time.Second)
 
-	var mu sync.Mutex
-	var wg sync.WaitGroup
 	var allCosts []SessionCost
 	var allTotal float64
-
-	for name, entry := range machines.Machines {
-		if !entry.Enabled {
+	for _, r := range results {
+		if r.Err != nil {
 			continue
 		}
-		wg.Add(1)
-		go func(name string, entry *config.MachineEntry) {
-			defer wg.Done()
-			gtBin := entry.GtBinary
-			if gtBin == "" {
-				gtBin = "gt"
-			}
-			out, err := runSSH(entry.SSHTarget(), gtBin+" costs --json", 15*time.Second)
-			if err != nil {
-				return
-			}
-			var output CostsOutput
-			if err := json.Unmarshal([]byte(out), &output); err != nil {
-				return
-			}
-			// Tag sessions with machine name
-			for i := range output.Sessions {
-				output.Sessions[i].Session = fmt.Sprintf("[%s] %s", name, output.Sessions[i].Session)
-			}
-			mu.Lock()
-			allCosts = append(allCosts, output.Sessions...)
-			allTotal += output.Total
-			mu.Unlock()
-		}(name, entry)
+		var output CostsOutput
+		if err := json.Unmarshal([]byte(r.Output), &output); err != nil {
+			continue
+		}
+		for i := range output.Sessions {
+			output.Sessions[i].Session = fmt.Sprintf("[%s] %s", r.Machine, output.Sessions[i].Session)
+		}
+		allCosts = append(allCosts, output.Sessions...)
+		allTotal += output.Total
 	}
-
-	wg.Wait()
 	return allCosts, allTotal
 }
 

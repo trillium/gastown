@@ -198,6 +198,51 @@ func buildRoutingContext(machines *config.MachinesConfig) dispatch.RoutingContex
 	return ctx
 }
 
+// SatelliteResult holds the result of running a command on a single satellite machine.
+type SatelliteResult struct {
+	Machine string
+	Output  string
+	Err     error
+}
+
+// runOnSatellites executes a remote gt command on all enabled machines in parallel.
+// buildCmd receives the machine's gt binary path and returns the full remote command.
+func runOnSatellites(machines *config.MachinesConfig, buildCmd func(gtBin string) string, timeout time.Duration) []SatelliteResult {
+	type indexedResult struct {
+		SatelliteResult
+	}
+
+	var wg sync.WaitGroup
+	ch := make(chan indexedResult, len(machines.Machines))
+
+	for name, entry := range machines.Machines {
+		if !entry.Enabled {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, entry *config.MachineEntry) {
+			defer wg.Done()
+			gtBin := entry.GtBinary
+			if gtBin == "" {
+				gtBin = "gt"
+			}
+			out, err := runSSH(entry.SSHTarget(), buildCmd(gtBin), timeout)
+			ch <- indexedResult{SatelliteResult{Machine: name, Output: out, Err: err}}
+		}(name, entry)
+	}
+
+	go func() {
+		wg.Wait()
+		close(ch)
+	}()
+
+	var results []SatelliteResult
+	for r := range ch {
+		results = append(results, r.SatelliteResult)
+	}
+	return results
+}
+
 // countRemotePolecats SSHes to each worker in parallel and counts active polecat tmux sessions.
 // Returns a map of machine name → active polecat count.
 func countRemotePolecats(machines *config.MachinesConfig, workerNames []string) map[string]int {

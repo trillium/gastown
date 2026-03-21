@@ -645,57 +645,26 @@ func runStatusFleet() error {
 		return err
 	}
 
-	machinesPath := filepath.Join(townRoot, "mayor", "machines.json")
+	machinesPath := constants.MayorMachinesPath(townRoot)
 	machines, err := config.LoadMachinesConfig(machinesPath)
 	if err != nil {
 		return fmt.Errorf("loading machines config: %w", err)
 	}
 
 	// Gather remote statuses in parallel
-	type result struct {
-		name   string
+	satResults := runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " status --json"
+	}, 15*time.Second)
+
+	// Build result map for text output and machine list for JSON
+	type parsedResult struct {
 		status *TownStatus
 		err    error
 	}
-
-	var wg sync.WaitGroup
-	results := make(chan result, len(machines.Machines))
-
-	for name, entry := range machines.Machines {
-		if !entry.Enabled {
-			continue
-		}
-		wg.Add(1)
-		go func(name string, entry *config.MachineEntry) {
-			defer wg.Done()
-			gtBin := entry.GtBinary
-			if gtBin == "" {
-				gtBin = "gt"
-			}
-			out, err := runSSH(entry.SSHTarget(), gtBin+" status --json", 15*time.Second)
-			if err != nil {
-				results <- result{name: name, err: err}
-				return
-			}
-			var ts TownStatus
-			if err := json.Unmarshal([]byte(out), &ts); err != nil {
-				results <- result{name: name, err: fmt.Errorf("parsing status JSON: %w", err)}
-				return
-			}
-			results <- result{name: name, status: &ts}
-		}(name, entry)
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
-
-	// Collect results
+	remoteResults := make(map[string]parsedResult, len(satResults))
 	var machineResults []MachineStatus
 
 	if statusJSON {
-		// Include local in JSON output
 		ms := MachineStatus{Machine: "local"}
 		if localErr != nil {
 			ms.Error = localErr.Error()
@@ -705,15 +674,25 @@ func runStatusFleet() error {
 		machineResults = append(machineResults, ms)
 	}
 
-	remoteResults := make(map[string]result)
-	for r := range results {
-		remoteResults[r.name] = r
-		if statusJSON {
-			ms := MachineStatus{Machine: r.name}
-			if r.err != nil {
-				ms.Error = r.err.Error()
+	for _, r := range satResults {
+		pr := parsedResult{}
+		if r.Err != nil {
+			pr.err = r.Err
+		} else {
+			var ts TownStatus
+			if err := json.Unmarshal([]byte(r.Output), &ts); err != nil {
+				pr.err = fmt.Errorf("parsing status JSON: %w", err)
 			} else {
-				ms.Status = *r.status
+				pr.status = &ts
+			}
+		}
+		remoteResults[r.Machine] = pr
+		if statusJSON {
+			ms := MachineStatus{Machine: r.Machine}
+			if pr.err != nil {
+				ms.Error = pr.err.Error()
+			} else {
+				ms.Status = *pr.status
 			}
 			machineResults = append(machineResults, ms)
 		}

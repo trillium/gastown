@@ -5,7 +5,6 @@ import (
 	"fmt"
 	"os"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -230,59 +229,29 @@ func scanSatellites(townRoot string) []SatelliteScanResult {
 		return nil // No machines config = single-machine setup
 	}
 
-	type result struct {
-		name string
-		scan *PatrolScanOutput
-		err  error
-	}
-
-	var wg sync.WaitGroup
-	results := make(chan result, len(machines.Machines))
-
-	for name, entry := range machines.Machines {
-		if !entry.Enabled {
-			continue
+	results := runOnSatellites(machines, func(gtBin string) string {
+		remoteCmd := gtBin + " patrol scan --json"
+		if patrolScanRig != "" {
+			remoteCmd += " --rig " + config.ShellQuote(patrolScanRig)
 		}
-		wg.Add(1)
-		go func(name string, entry *config.MachineEntry) {
-			defer wg.Done()
-			gtBin := entry.GtBinary
-			if gtBin == "" {
-				gtBin = "gt"
-			}
-			remoteCmd := gtBin + " patrol scan --json"
-			if patrolScanRig != "" {
-				remoteCmd += " --rig " + config.ShellQuote(patrolScanRig)
-			}
-			if patrolScanNotify {
-				remoteCmd += " --notify"
-			}
-			out, err := runSSH(entry.SSHTarget(), remoteCmd, 30*time.Second)
-			if err != nil {
-				results <- result{name: name, err: err}
-				return
-			}
-			var scan PatrolScanOutput
-			if err := json.Unmarshal([]byte(out), &scan); err != nil {
-				results <- result{name: name, err: fmt.Errorf("parsing scan JSON: %w", err)}
-				return
-			}
-			results <- result{name: name, scan: &scan}
-		}(name, entry)
-	}
-
-	go func() {
-		wg.Wait()
-		close(results)
-	}()
+		if patrolScanNotify {
+			remoteCmd += " --notify"
+		}
+		return remoteCmd
+	}, 30*time.Second)
 
 	var satellite []SatelliteScanResult
-	for r := range results {
-		sr := SatelliteScanResult{Machine: r.name}
-		if r.err != nil {
-			sr.Error = r.err.Error()
+	for _, r := range results {
+		sr := SatelliteScanResult{Machine: r.Machine}
+		if r.Err != nil {
+			sr.Error = r.Err.Error()
 		} else {
-			sr.Scan = r.scan
+			var scan PatrolScanOutput
+			if err := json.Unmarshal([]byte(r.Output), &scan); err != nil {
+				sr.Error = fmt.Sprintf("parsing scan JSON: %v", err)
+			} else {
+				sr.Scan = &scan
+			}
 		}
 		satellite = append(satellite, sr)
 	}
