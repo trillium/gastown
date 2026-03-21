@@ -12,6 +12,7 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
@@ -773,7 +774,7 @@ func resolvePolecatSessionName(rigName, polecatName string) string {
 // attachRemoteSession execs into an interactive SSH session attached to a
 // remote tmux session. This replaces the current process.
 func attachRemoteSession(townRoot, machineName, sessionName string) error {
-	machinesPath := filepath.Join(townRoot, "mayor", "machines.json")
+	machinesPath := constants.MayorMachinesPath(townRoot)
 	machines, err := config.LoadMachinesConfig(machinesPath)
 	if err != nil {
 		return err
@@ -799,7 +800,7 @@ func attachRemoteSession(townRoot, machineName, sessionName string) error {
 
 // runRemoteGT runs a gt command on a satellite machine via SSH.
 func runRemoteGT(townRoot, machineName, remoteCmd string) error {
-	machinesPath := filepath.Join(townRoot, "mayor", "machines.json")
+	machinesPath := constants.MayorMachinesPath(townRoot)
 	machines, err := config.LoadMachinesConfig(machinesPath)
 	if err != nil {
 		return err
