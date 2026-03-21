@@ -522,6 +522,7 @@ func buildBootstrapScript(townRoot, rigName, polecatName, doltHost string, doltP
 	if gtBinary == "" {
 		gtBinary = "gt.real" // satellites use gt.real to bypass proxy-client shim
 	}
+	q := config.ShellQuote
 	return fmt.Sprintf(`
 set -e
 CERT_DIR=$(mktemp -d)
@@ -550,28 +551,28 @@ SPAWN_JSON=$(printf '%%s\n' "$SPAWN_OUTPUT" | grep '^{' | tail -1)
 CLONE_PATH=$(printf '%%s' "$SPAWN_JSON" | jq -r .clone_path)
 
 # Session name follows gt convention
-SESS="gt-%s-p-%s"
+SESS=%s
 
 # Create a detached tmux session in the polecat's worktree
 tmux new-session -d -s "$SESS" -c "$CLONE_PATH" 2>/dev/null || true
 
 # Set proxy env vars in tmux session (must happen after session creation)
-tmux setenv -t "$SESS" GT_PROXY_URL "%s"
+tmux setenv -t "$SESS" GT_PROXY_URL %s
 tmux setenv -t "$SESS" GT_PROXY_CERT "$CERT_DIR/cert.pem"
 tmux setenv -t "$SESS" GT_PROXY_KEY "$CERT_DIR/key.pem"
 tmux setenv -t "$SESS" GT_PROXY_CA "$CERT_DIR/ca.pem"
 tmux setenv -t "$SESS" GT_REAL_BIN "$HOME/.local/bin/gt.real"
-tmux setenv -t "$SESS" GT_DOLT_HOST "%s"
+tmux setenv -t "$SESS" GT_DOLT_HOST %s
 tmux setenv -t "$SESS" GT_DOLT_PORT "%d"
 
 # Output merged session info as JSON
 printf '%%s' "$SPAWN_JSON" | jq -c --arg sess "$SESS" --arg cert_dir "$CERT_DIR" '. + {session_name: $sess, cert_dir: $cert_dir}'
 `,
-		townRoot,
-		gtBinary, rigName, polecatName, doltHost, doltPort,
-		rigName, polecatName,
-		proxyURL,
-		doltHost, doltPort,
+		q(townRoot),
+		q(gtBinary), q(rigName), q(polecatName), q(doltHost), doltPort,
+		q(fmt.Sprintf("gt-%s-p-%s", rigName, polecatName)),
+		q(proxyURL),
+		q(doltHost), doltPort,
 	)
 }
 
@@ -642,7 +643,7 @@ func spawnOnTarget(
 // 2. Proxy is reachable (gt version works via proxy)
 func verifyBootstrap(sshTarget, sessionName, expectedURL string) error {
 	// Check tmux env var
-	cmd := fmt.Sprintf(`tmux showenv -t %s GT_PROXY_URL 2>/dev/null`, sessionName)
+	cmd := fmt.Sprintf(`tmux showenv -t %s GT_PROXY_URL 2>/dev/null`, config.ShellQuote(sessionName))
 	stdout, err := runSSH(sshTarget, cmd, 15*time.Second)
 	if err != nil {
 		return fmt.Errorf("GT_PROXY_URL not set in tmux session: %w", err)
@@ -655,7 +656,7 @@ func verifyBootstrap(sshTarget, sessionName, expectedURL string) error {
 
 // killRemoteSession kills a tmux session on a remote machine.
 func killRemoteSession(sshTarget, sessionName string) error {
-	cmd := fmt.Sprintf(`tmux kill-session -t %s 2>/dev/null || true`, sessionName)
+	cmd := fmt.Sprintf(`tmux kill-session -t %s 2>/dev/null || true`, config.ShellQuote(sessionName))
 	_, err := runSSH(sshTarget, cmd, 15*time.Second)
 	return err
 }
