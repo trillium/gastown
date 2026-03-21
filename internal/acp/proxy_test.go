@@ -868,7 +868,7 @@ func TestIntegration_FullLoop(t *testing.T) {
 	mockAgent := createMockACPAgent(t, true)
 	defer os.Remove(mockAgent)
 
-	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
 	p := NewProxy()
@@ -879,8 +879,15 @@ func TestIntegration_FullLoop(t *testing.T) {
 	p.setStreams(nil, &uiStdout)
 	p.stdoutMux.Unlock()
 
-	// Input from UI side - using a pipe to control EOF
-	uiStdinR, uiStdinW := io.Pipe()
+	// Input from UI side - using an OS pipe for buffered writes.
+	// io.Pipe is synchronous (writes block until read), which creates a race
+	// between the writing goroutine and Forward()'s forwardToAgent reader.
+	// os.Pipe has kernel-level buffering, so writes succeed immediately.
+	uiStdinR, uiStdinW, err := os.Pipe()
+	if err != nil {
+		t.Fatalf("failed to create pipe: %v", err)
+	}
+	defer uiStdinR.Close()
 	p.stdin = uiStdinR
 
 	tmpDir := t.TempDir()
@@ -888,34 +895,46 @@ func TestIntegration_FullLoop(t *testing.T) {
 		t.Fatalf("failed to start proxy: %v", err)
 	}
 
-	// 1. Send messages from the UI
+	// Run Forward() in a background goroutine. Forward() must be running before
+	// we send messages, because it starts forwardToAgent (which reads from p.stdin)
+	// and forwardFromAgent (which relays agent output to the UI buffer).
+	// Without this, messages written to the OS pipe sit unread until Forward starts,
+	// and the session ID extraction may not complete before the timeout.
+	forwardDone := make(chan error, 1)
 	go func() {
-		defer uiStdinW.Close()
-		messages := []string{
-			`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
-			`{"jsonrpc":"2.0","id":2,"method":"session/new"}`,
-			`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"hello"}]}}`,
-		}
-		for _, m := range messages {
-			fmt.Fprintln(uiStdinW, m)
-			time.Sleep(50 * time.Millisecond) // Give time for processing
-		}
-
-		// Wait for session ID to be set (completes handshake)
-		waitCtx, waitCancel := context.WithTimeout(ctx, 2*time.Second)
-		defer waitCancel()
-		if err := p.WaitForSessionID(waitCtx); err != nil {
-			t.Errorf("failed to get session ID: %v", err)
-			p.Shutdown()
-			return
-		}
-
-		// Wait a bit more for the prompt response to flow through
-		time.Sleep(500 * time.Millisecond)
-		p.Shutdown()
+		forwardDone <- p.Forward()
 	}()
+	// Allow Forward's goroutines (forwardToAgent, forwardFromAgent) to start
+	// their read loops before we begin sending messages. Under CPU contention
+	// (e.g., when running the full test suite), goroutine scheduling can be delayed.
+	time.Sleep(200 * time.Millisecond)
 
-	err := p.Forward()
+	// Send messages from the UI side
+	messages := []string{
+		`{"jsonrpc":"2.0","id":1,"method":"initialize","params":{"protocolVersion":1}}`,
+		`{"jsonrpc":"2.0","id":2,"method":"session/new"}`,
+		`{"jsonrpc":"2.0","id":3,"method":"session/prompt","params":{"prompt":[{"type":"text","text":"hello"}]}}`,
+	}
+	for _, m := range messages {
+		fmt.Fprintln(uiStdinW, m)
+		time.Sleep(50 * time.Millisecond)
+	}
+
+	// Wait for session ID to be set (completes handshake).
+	// Use a generous timeout — under CPU contention from the full test suite,
+	// the shell-script agent and goroutine scheduling can be slow.
+	waitCtx, waitCancel := context.WithTimeout(ctx, 4*time.Second)
+	defer waitCancel()
+	if err = p.WaitForSessionID(waitCtx); err != nil {
+		t.Fatalf("failed to get session ID: %v", err)
+	}
+
+	// Wait for the prompt response to flow through, then shut down
+	time.Sleep(500 * time.Millisecond)
+	uiStdinW.Close()
+	p.Shutdown()
+
+	err = <-forwardDone
 	if err != nil && !strings.Contains(err.Error(), "signal: killed") && !strings.Contains(err.Error(), "context canceled") {
 		t.Logf("Forward() returned error (expected during shutdown): %v", err)
 	}
