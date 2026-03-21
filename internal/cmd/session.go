@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strconv"
 	"strings"
@@ -300,6 +301,28 @@ func runSessionStop(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
+	// Check if running locally
+	running, _ := polecatMgr.IsRunning(polecatName)
+	if !running {
+		// Try remote
+		townRoot, twErr := workspace.FindFromCwd()
+		if twErr == nil && townRoot != "" {
+			sessionName := resolvePolecatSessionName(rigName, polecatName)
+			if machine, mErr := resolveSessionMachine(townRoot, sessionName); mErr == nil {
+				remoteCmd := "gt session stop " + config.ShellQuote(args[0])
+				if sessionForce {
+					remoteCmd += " --force"
+				}
+				if err := runRemoteGT(townRoot, machine, remoteCmd); err != nil {
+					return fmt.Errorf("remote stop on %s: %w", machine, err)
+				}
+				fmt.Printf("%s Session stopped on %s.\n", style.Bold.Render("✓"), machine)
+				return nil
+			}
+		}
+		return fmt.Errorf("session %s/%s not found locally or on any satellite", rigName, polecatName)
+	}
+
 	if sessionForce {
 		fmt.Printf("Force stopping session for %s/%s...\n", rigName, polecatName)
 	} else {
@@ -334,6 +357,20 @@ func runSessionAttach(cmd *cobra.Command, args []string) error {
 	polecatMgr, _, err := getSessionManager(rigName)
 	if err != nil {
 		return err
+	}
+
+	// Check if running locally
+	running, _ := polecatMgr.IsRunning(polecatName)
+	if !running {
+		// Try remote — interactive SSH attach
+		townRoot, twErr := workspace.FindFromCwd()
+		if twErr == nil && townRoot != "" {
+			sessionName := resolvePolecatSessionName(rigName, polecatName)
+			if machine, mErr := resolveSessionMachine(townRoot, sessionName); mErr == nil {
+				return attachRemoteSession(townRoot, machine, sessionName)
+			}
+		}
+		return fmt.Errorf("session %s/%s not found locally or on any satellite", rigName, polecatName)
 	}
 
 	// Attach (this replaces the process)
@@ -505,10 +542,29 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 		return err
 	}
 
-	// Check if running
+	// Check if running locally
 	running, err := polecatMgr.IsRunning(polecatName)
 	if err != nil {
 		return fmt.Errorf("checking session: %w", err)
+	}
+
+	if !running {
+		// Check if running remotely — delegate restart to remote machine
+		townRoot, twErr := workspace.FindFromCwd()
+		if twErr == nil && townRoot != "" {
+			sessionName := resolvePolecatSessionName(rigName, polecatName)
+			if machine, mErr := resolveSessionMachine(townRoot, sessionName); mErr == nil {
+				remoteCmd := "gt session restart " + config.ShellQuote(args[0])
+				if sessionForce {
+					remoteCmd += " --force"
+				}
+				if err := runRemoteGT(townRoot, machine, remoteCmd); err != nil {
+					return fmt.Errorf("remote restart on %s: %w", machine, err)
+				}
+				fmt.Printf("%s Session restarted on %s.\n", style.Bold.Render("✓"), machine)
+				return nil
+			}
+		}
 	}
 
 	if running {
@@ -523,8 +579,6 @@ func runSessionRestart(cmd *cobra.Command, args []string) error {
 		}
 
 		// Wait for session to fully terminate before starting a new one.
-		// Without this, Start may fail or create a duplicate if the old
-		// session hasn't been cleaned up by tmux yet.
 		for i := 0; i < 10; i++ {
 			still, _ := polecatMgr.IsRunning(polecatName)
 			if !still {
@@ -704,4 +758,67 @@ func runSessionCheck(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+// resolvePolecatSessionName converts a rig/polecat pair to a tmux session name.
+func resolvePolecatSessionName(rigName, polecatName string) string {
+	rigPrefix := session.PrefixFor(rigName)
+	if strings.HasPrefix(polecatName, "crew/") {
+		crewName := strings.TrimPrefix(polecatName, "crew/")
+		return session.CrewSessionName(rigPrefix, crewName)
+	}
+	return session.PolecatSessionName(rigPrefix, polecatName)
+}
+
+// attachRemoteSession execs into an interactive SSH session attached to a
+// remote tmux session. This replaces the current process.
+func attachRemoteSession(townRoot, machineName, sessionName string) error {
+	machinesPath := filepath.Join(townRoot, "mayor", "machines.json")
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return err
+	}
+
+	entry, ok := machines.Machines[machineName]
+	if !ok {
+		return fmt.Errorf("machine %q not found", machineName)
+	}
+
+	target := entry.SSHTarget()
+	remoteCmd := fmt.Sprintf("tmux -L gt attach -t %s", config.ShellQuote(sessionName))
+
+	fmt.Printf("Attaching to %s on %s...\n", sessionName, machineName)
+
+	// Use exec to replace current process with interactive SSH
+	sshCmd := exec.Command("ssh", "-t", target, remoteCmd)
+	sshCmd.Stdin = os.Stdin
+	sshCmd.Stdout = os.Stdout
+	sshCmd.Stderr = os.Stderr
+	return sshCmd.Run()
+}
+
+// runRemoteGT runs a gt command on a satellite machine via SSH.
+func runRemoteGT(townRoot, machineName, remoteCmd string) error {
+	machinesPath := filepath.Join(townRoot, "mayor", "machines.json")
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return err
+	}
+
+	entry, ok := machines.Machines[machineName]
+	if !ok {
+		return fmt.Errorf("machine %q not found", machineName)
+	}
+
+	gtBin := entry.GtBinary
+	if gtBin == "" {
+		gtBin = "gt"
+	}
+	// Prepend gt binary path if the command doesn't already start with it
+	if !strings.HasPrefix(remoteCmd, gtBin) {
+		remoteCmd = gtBin + " " + remoteCmd
+	}
+
+	_, err = runSSH(entry.SSHTarget(), remoteCmd, 30*time.Second)
+	return err
 }
