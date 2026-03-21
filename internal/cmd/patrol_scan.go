@@ -535,13 +535,20 @@ func printPatrolScanSummary(scan *PatrolScanOutput) {
 	}
 
 	if zombieCount == 0 && stallCount == 0 && completionCount == 0 {
-		fmt.Printf("  %s all clear (checked %d)\n", style.Success.Render("✓"), scan.Zombies.Checked)
+		checked := 0
+		if scan.Zombies != nil {
+			checked = scan.Zombies.Checked
+		}
+		fmt.Printf("  %s all clear (checked %d)\n", style.Success.Render("✓"), checked)
 		return
 	}
 
 	fmt.Printf("  rig: %s  zombies: %d (%d active)  stalls: %d  completions: %d\n",
 		scan.Rig, zombieCount, activeCount, stallCount, completionCount)
 
+	if scan.Zombies == nil {
+		return
+	}
 	for _, z := range scan.Zombies.Zombies {
 		icon := "⚠"
 		if z.WasActive {

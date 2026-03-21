@@ -457,13 +457,33 @@ func buildInfoFromConfig(rc *config.RuntimeConfig) string {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
-	if statusFleet {
-		return runStatusFleet()
-	}
 	if statusWatch {
 		return runStatusWatch(cmd, args)
 	}
+	// Automatically show fleet view when satellites are configured.
+	if hasSatellites() || statusFleet {
+		return runStatusFleet()
+	}
 	return runStatusOnce(cmd, args)
+}
+
+// hasSatellites returns true if machines.json exists with enabled machines.
+func hasSatellites() bool {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return false
+	}
+	machinesPath := constants.MayorMachinesPath(townRoot)
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return false
+	}
+	for _, entry := range machines.Machines {
+		if entry.Enabled {
+			return true
+		}
+	}
+	return false
 }
 
 func runStatusWatch(_ *cobra.Command, _ []string) error {

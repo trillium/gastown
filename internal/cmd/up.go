@@ -337,7 +337,7 @@ func runUp(cmd *cobra.Command, args []string) error {
 
 	// Verify satellite connectivity and propagate Dolt config (if multi-machine).
 	// Best-effort: failures warn but don't block local startup.
-	satelliteServices := verifySatellites(townRoot, doltSkipped || !doltOK)
+	satelliteServices := verifySatellites(townRoot)
 	services = append(services, satelliteServices...)
 	for _, svc := range satelliteServices {
 		if !svc.OK {
@@ -1049,7 +1049,7 @@ func recoverOrphanedBeads(townRoot string, rigs []string, prefetchedRigs map[str
 // verifySatellites checks satellite SSH connectivity and propagates Dolt config.
 // Returns ServiceStatus entries for each satellite. Silently returns nil if
 // machines.json doesn't exist (single-machine setup).
-func verifySatellites(townRoot string, doltDown bool) []ServiceStatus {
+func verifySatellites(townRoot string) []ServiceStatus {
 	machinesPath := constants.MayorMachinesPath(townRoot)
 	machines, err := config.LoadMachinesConfig(machinesPath)
 	if err != nil {
@@ -1064,8 +1064,6 @@ func verifySatellites(townRoot string, doltDown bool) []ServiceStatus {
 
 	var wg sync.WaitGroup
 	results := make(chan result, len(machines.Machines))
-
-	doltCfg := doltserver.DefaultConfig(townRoot)
 
 	for name, entry := range machines.Machines {
 		if !entry.Enabled {
@@ -1083,21 +1081,7 @@ func verifySatellites(townRoot string, doltDown bool) []ServiceStatus {
 				return
 			}
 
-			// Propagate Dolt host/port to satellite beads configs if Dolt is up
-			detail := "reachable"
-			if !doltDown && doltCfg.Host != "" {
-				gtBin := entry.GtBinary
-				if gtBin == "" {
-					gtBin = "gt"
-				}
-				// Set BEADS_DOLT_SERVER_HOST and BEADS_DOLT_PORT in satellite env
-				envCmd := fmt.Sprintf("export BEADS_DOLT_SERVER_HOST=%s BEADS_DOLT_PORT=%d && %s status --json >/dev/null 2>&1",
-					config.ShellQuote(doltCfg.Host), doltCfg.Port, gtBin)
-				_, _ = runSSH(target, envCmd, 10*time.Second)
-				detail = fmt.Sprintf("reachable (dolt→%s:%d)", doltCfg.Host, doltCfg.Port)
-			}
-
-			results <- result{name: name, ok: true, detail: detail}
+			results <- result{name: name, ok: true, detail: "reachable"}
 		}(name, entry)
 	}
 

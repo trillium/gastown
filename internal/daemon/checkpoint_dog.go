@@ -78,15 +78,14 @@ func (d *Daemon) runCheckpointDog() {
 		totalCheckpointed += checkpointed
 	}
 
-	// Trigger checkpoint on satellite machines.
-	satelliteCheckpointed := d.checkpointSatellites()
-	totalCheckpointed += satelliteCheckpointed
+	// Trigger checkpoint on satellite machines (fire-and-forget, errors logged).
+	satelliteCount := d.checkpointSatellites()
 
 	mol.closeStep("scan")
 	mol.closeStep("checkpoint")
 
-	d.logger.Printf("checkpoint_dog: cycle complete — scanned %d worktrees, checkpointed %d (satellites: %d)",
-		totalScanned, totalCheckpointed, satelliteCheckpointed)
+	d.logger.Printf("checkpoint_dog: cycle complete — scanned %d worktrees, checkpointed %d, satellites triggered: %d",
+		totalScanned, totalCheckpointed, satelliteCount)
 	mol.closeStep("report")
 }
 
@@ -170,7 +169,7 @@ func (d *Daemon) checkpointWorktree(workDir, rigName, polecatName string) bool {
 
 // checkpointSatellites triggers checkpoint on all enabled satellite machines.
 // SSHes to each satellite and runs the checkpoint logic via gt there.
-// Returns the total number of checkpoints created across all satellites.
+// Returns the number of satellites successfully triggered.
 func (d *Daemon) checkpointSatellites() int {
 	machinesPath := constants.MayorMachinesPath(d.config.TownRoot)
 	machines, err := config.LoadMachinesConfig(machinesPath)
@@ -216,13 +215,15 @@ func (d *Daemon) checkpointSatellites() int {
 		close(results)
 	}()
 
-	total := 0
+	triggered := 0
 	for r := range results {
 		if r.err != nil {
 			d.logger.Printf("checkpoint_dog: satellite %s failed: %v", r.name, r.err)
+		} else {
+			triggered++
 		}
 	}
-	return total
+	return triggered
 }
 
 // runSSHCmd executes a command on a remote machine via SSH with a timeout.
