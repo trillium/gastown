@@ -12,6 +12,7 @@ import (
 	"regexp"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
@@ -277,6 +278,11 @@ func runLiveCosts() error {
 		total += cost
 	}
 
+	// Include satellite costs automatically.
+	satelliteCosts, satelliteTotal := collectSatelliteCosts()
+	costs = append(costs, satelliteCosts...)
+	total += satelliteTotal
+
 	// Sort by session name
 	sort.Slice(costs, func(i, j int) bool {
 		return costs[i].Session < costs[j].Session
@@ -290,6 +296,64 @@ func runLiveCosts() error {
 	}
 
 	return outputCostsHuman(costs, total)
+}
+
+// collectSatelliteCosts SSHes to all enabled satellites and runs `gt costs --json`
+// to collect live session costs. Returns merged costs and total.
+func collectSatelliteCosts() ([]SessionCost, float64) {
+	townRoot, err := workspace.FindFromCwd()
+	if err != nil || townRoot == "" {
+		return nil, 0
+	}
+
+	machinesPath := constants.MayorMachinesPath(townRoot)
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return nil, 0
+	}
+
+	type result struct {
+		costs []SessionCost
+		total float64
+	}
+
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var allCosts []SessionCost
+	var allTotal float64
+
+	for name, entry := range machines.Machines {
+		if !entry.Enabled {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, entry *config.MachineEntry) {
+			defer wg.Done()
+			gtBin := entry.GtBinary
+			if gtBin == "" {
+				gtBin = "gt"
+			}
+			out, err := runSSH(entry.SSHTarget(), gtBin+" costs --json", 15*time.Second)
+			if err != nil {
+				return
+			}
+			var output CostsOutput
+			if err := json.Unmarshal([]byte(out), &output); err != nil {
+				return
+			}
+			// Tag sessions with machine name
+			for i := range output.Sessions {
+				output.Sessions[i].Session = fmt.Sprintf("[%s] %s", name, output.Sessions[i].Session)
+			}
+			mu.Lock()
+			allCosts = append(allCosts, output.Sessions...)
+			allTotal += output.Total
+			mu.Unlock()
+		}(name, entry)
+	}
+
+	wg.Wait()
+	return allCosts, allTotal
 }
 
 func runCostsFromLedger() error {
