@@ -773,3 +773,172 @@ func TestGatherServiceStatus_DoltRemote(t *testing.T) {
 		t.Error("dolt should be marked as remote")
 	}
 }
+
+// --- prefetchAgentBeads tests ---
+
+// stubBeadsLoader is a test stub implementing the beadsLoader interface.
+type stubBeadsLoader struct {
+	agentBeads map[string]*beads.Issue
+	hookBeads  map[string]*beads.Issue
+}
+
+func (s *stubBeadsLoader) ListAgentBeads() (map[string]*beads.Issue, error) {
+	return s.agentBeads, nil
+}
+
+func (s *stubBeadsLoader) ShowMultiple(ids []string) (map[string]*beads.Issue, error) {
+	result := make(map[string]*beads.Issue)
+	for _, id := range ids {
+		if issue, ok := s.hookBeads[id]; ok {
+			result[id] = issue
+		}
+	}
+	return result, nil
+}
+
+func withBeadsLoaderSeam(t *testing.T, loaders map[string]*stubBeadsLoader) {
+	t.Helper()
+	orig := newBeadsLoaderFn
+	newBeadsLoaderFn = func(path string) beadsLoader {
+		if loader, ok := loaders[path]; ok {
+			return loader
+		}
+		return &stubBeadsLoader{} // empty stub for unknown paths
+	}
+	t.Cleanup(func() { newBeadsLoaderFn = orig })
+}
+
+func TestPrefetchAgentBeads_TownLevel(t *testing.T) {
+	townRoot := "/test/town"
+	townBeadsPath := beads.GetTownBeadsPath(townRoot)
+
+	withBeadsLoaderSeam(t, map[string]*stubBeadsLoader{
+		townBeadsPath: {
+			agentBeads: map[string]*beads.Issue{
+				"agent-1": {ID: "agent-1", Title: "Mayor", HookBead: "hook-1"},
+			},
+			hookBeads: map[string]*beads.Issue{
+				"hook-1": {ID: "hook-1", Title: "Fix auth bug"},
+			},
+		},
+	})
+
+	agents, hooks := prefetchAgentBeads(townRoot, nil)
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent bead, got %d", len(agents))
+	}
+	if _, ok := agents["agent-1"]; !ok {
+		t.Error("missing agent-1")
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("expected 1 hook bead, got %d", len(hooks))
+	}
+	if _, ok := hooks["hook-1"]; !ok {
+		t.Error("missing hook-1")
+	}
+}
+
+func TestPrefetchAgentBeads_RigLevel(t *testing.T) {
+	townRoot := "/test/town"
+	townBeadsPath := beads.GetTownBeadsPath(townRoot)
+	rigBeadsPath := "/test/town/rigs/gastown/mayor/rig"
+
+	withBeadsLoaderSeam(t, map[string]*stubBeadsLoader{
+		townBeadsPath: {agentBeads: map[string]*beads.Issue{}},
+		rigBeadsPath: {
+			agentBeads: map[string]*beads.Issue{
+				"rig-agent": {ID: "rig-agent", Title: "Witness", HookBead: "rig-hook"},
+			},
+			hookBeads: map[string]*beads.Issue{
+				"rig-hook": {ID: "rig-hook", Title: "Patrol task"},
+			},
+		},
+	})
+
+	rigs := []*rig.Rig{{Path: "/test/town/rigs/gastown"}}
+	agents, hooks := prefetchAgentBeads(townRoot, rigs)
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent bead, got %d", len(agents))
+	}
+	if _, ok := agents["rig-agent"]; !ok {
+		t.Error("missing rig-agent")
+	}
+	if len(hooks) != 1 {
+		t.Fatalf("expected 1 hook bead, got %d", len(hooks))
+	}
+}
+
+func TestPrefetchAgentBeads_MergesMultipleRigs(t *testing.T) {
+	townRoot := "/test/town"
+	townBeadsPath := beads.GetTownBeadsPath(townRoot)
+
+	withBeadsLoaderSeam(t, map[string]*stubBeadsLoader{
+		townBeadsPath: {
+			agentBeads: map[string]*beads.Issue{
+				"town-agent": {ID: "town-agent", Title: "Mayor"},
+			},
+		},
+		"/test/town/rigs/rig1/mayor/rig": {
+			agentBeads: map[string]*beads.Issue{
+				"rig1-agent": {ID: "rig1-agent", Title: "Witness 1"},
+			},
+		},
+		"/test/town/rigs/rig2/mayor/rig": {
+			agentBeads: map[string]*beads.Issue{
+				"rig2-agent": {ID: "rig2-agent", Title: "Witness 2"},
+			},
+		},
+	})
+
+	rigs := []*rig.Rig{
+		{Path: "/test/town/rigs/rig1"},
+		{Path: "/test/town/rigs/rig2"},
+	}
+	agents, _ := prefetchAgentBeads(townRoot, rigs)
+	if len(agents) != 3 {
+		t.Fatalf("expected 3 agent beads (1 town + 2 rig), got %d", len(agents))
+	}
+	for _, id := range []string{"town-agent", "rig1-agent", "rig2-agent"} {
+		if _, ok := agents[id]; !ok {
+			t.Errorf("missing agent %q", id)
+		}
+	}
+}
+
+func TestPrefetchAgentBeads_NoAgentBeads(t *testing.T) {
+	townRoot := "/test/town"
+	townBeadsPath := beads.GetTownBeadsPath(townRoot)
+
+	withBeadsLoaderSeam(t, map[string]*stubBeadsLoader{
+		townBeadsPath: {agentBeads: nil},
+	})
+
+	agents, hooks := prefetchAgentBeads(townRoot, nil)
+	if len(agents) != 0 {
+		t.Errorf("expected 0 agents, got %d", len(agents))
+	}
+	if len(hooks) != 0 {
+		t.Errorf("expected 0 hooks, got %d", len(hooks))
+	}
+}
+
+func TestPrefetchAgentBeads_AgentWithNoHook(t *testing.T) {
+	townRoot := "/test/town"
+	townBeadsPath := beads.GetTownBeadsPath(townRoot)
+
+	withBeadsLoaderSeam(t, map[string]*stubBeadsLoader{
+		townBeadsPath: {
+			agentBeads: map[string]*beads.Issue{
+				"agent-idle": {ID: "agent-idle", Title: "Idle polecat"},
+			},
+		},
+	})
+
+	agents, hooks := prefetchAgentBeads(townRoot, nil)
+	if len(agents) != 1 {
+		t.Fatalf("expected 1 agent, got %d", len(agents))
+	}
+	if len(hooks) != 0 {
+		t.Errorf("expected 0 hooks (agent has no hook bead), got %d", len(hooks))
+	}
+}
