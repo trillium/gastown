@@ -889,6 +889,170 @@ func TestListAllRemoteSessions_EmptyOutput(t *testing.T) {
 	}
 }
 
+// --- countRemotePolecatsOnMachine tests ---
+
+func TestCountRemotePolecatsOnMachine_CountsOnlyPolecats(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		// Mix of polecat, crew, and unknown sessions
+		return "gt-gastown-p-Toast\ngt-gastown-p-Butter\ngt-crew-hannah\nhq-mayor\nrandom-session\n", nil
+	})
+
+	entry := &config.MachineEntry{Host: "10.0.0.2", User: "u"}
+	count, err := countRemotePolecatsOnMachine(entry)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	// Only "gt-gastown-p-Toast" and "gt-gastown-p-Butter" are polecats (parsed as polecat role via prefix "gt")
+	// "gt-crew-hannah" is a crew session, "hq-mayor" is mayor, "random-session" is unparsable
+	if count != 2 {
+		t.Errorf("count = %d, want 2 (only polecats)", count)
+	}
+}
+
+func TestCountRemotePolecatsOnMachine_SSHFailure(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "", fmt.Errorf("connection refused")
+	})
+
+	entry := &config.MachineEntry{Host: "10.0.0.2", User: "u"}
+	_, err := countRemotePolecatsOnMachine(entry)
+	if err == nil {
+		t.Error("expected error on SSH failure")
+	}
+}
+
+func TestCountRemotePolecatsOnMachine_NoSessions(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "", nil
+	})
+
+	entry := &config.MachineEntry{Host: "10.0.0.2", User: "u"}
+	count, err := countRemotePolecatsOnMachine(entry)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if count != 0 {
+		t.Errorf("count = %d, want 0", count)
+	}
+}
+
+// --- countRemotePolecats tests ---
+
+func TestCountRemotePolecats_ParallelAggregation(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(target, _ string, _ time.Duration) (string, error) {
+		switch target {
+		case "u@10.0.0.2":
+			return "gt-gastown-p-Alpha\ngt-gastown-p-Beta\n", nil
+		case "u@10.0.0.3":
+			return "gt-gastown-p-Gamma\n", nil
+		default:
+			return "", nil
+		}
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true, MaxPolecats: 4},
+		"m2": {Host: "10.0.0.3", User: "u", Roles: []string{"worker"}, Enabled: true, MaxPolecats: 4},
+	})
+
+	counts := countRemotePolecats(machines, []string{"m1", "m2"})
+	if counts["m1"] != 2 {
+		t.Errorf("m1 count = %d, want 2", counts["m1"])
+	}
+	if counts["m2"] != 1 {
+		t.Errorf("m2 count = %d, want 1", counts["m2"])
+	}
+}
+
+func TestCountRemotePolecats_SSHFailureAssumesMax(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "", fmt.Errorf("timeout")
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true, MaxPolecats: 5},
+	})
+
+	counts := countRemotePolecats(machines, []string{"m1"})
+	if counts["m1"] != 5 {
+		t.Errorf("on SSH failure, count should be MaxPolecats (5), got %d", counts["m1"])
+	}
+}
+
+// --- verifyBootstrap tests ---
+
+func TestVerifyBootstrap_Success(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "GT_PROXY_URL=https://10.0.0.1:9876\n", nil
+	})
+
+	err := verifyBootstrap("u@10.0.0.2", "gt-gastown-p-Toast", "https://10.0.0.1:9876")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+}
+
+func TestVerifyBootstrap_URLMismatch(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "GT_PROXY_URL=https://wrong-host:9876\n", nil
+	})
+
+	err := verifyBootstrap("u@10.0.0.2", "gt-gastown-p-Toast", "https://10.0.0.1:9876")
+	if err == nil {
+		t.Fatal("expected error on URL mismatch")
+	}
+	if !strings.Contains(err.Error(), "mismatch") {
+		t.Errorf("error should mention 'mismatch', got: %v", err)
+	}
+}
+
+func TestVerifyBootstrap_SSHFailure(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "", fmt.Errorf("session not found")
+	})
+
+	err := verifyBootstrap("u@10.0.0.2", "gt-gastown-p-Toast", "https://10.0.0.1:9876")
+	if err == nil {
+		t.Fatal("expected error on SSH failure")
+	}
+}
+
+// --- killRemoteSession tests ---
+
+func TestKillRemoteSession_Success(t *testing.T) {
+	var capturedCmd string
+	withMockSSH(t, func(_, cmd string, _ time.Duration) (string, error) {
+		capturedCmd = cmd
+		return "", nil
+	})
+
+	err := killRemoteSession("u@10.0.0.2", "gt-gastown-p-Toast")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !strings.Contains(capturedCmd, "kill-session") {
+		t.Errorf("expected kill-session in command, got %q", capturedCmd)
+	}
+	// Verify session name appears in command (ShellQuote only adds quotes for special chars)
+	if !strings.Contains(capturedCmd, "gt-gastown-p-Toast") {
+		t.Errorf("session name should appear in command, got %q", capturedCmd)
+	}
+}
+
+func TestKillRemoteSession_SSHFailure(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "", fmt.Errorf("connection refused")
+	})
+
+	err := killRemoteSession("u@10.0.0.2", "gt-gastown-p-Toast")
+	if err == nil {
+		t.Error("expected error on SSH failure")
+	}
+}
+
 // --- helpers ---
 
 func keys(m map[string]*config.MachineEntry) []string {
