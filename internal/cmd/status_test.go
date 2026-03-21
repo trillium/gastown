@@ -671,3 +671,105 @@ func TestDiscoverLiveSessions_Empty(t *testing.T) {
 		t.Errorf("expected empty map for no sessions, got %d entries", len(result))
 	}
 }
+
+// --- gatherServiceStatus tests ---
+
+func withServiceSeams(t *testing.T) {
+	t.Helper()
+	origDaemon := daemonIsRunningFn
+	origDolt := gatherDoltStatusFn
+	origTmux := gatherTmuxStatusFn
+	origACP := gatherACPStatusFn
+	t.Cleanup(func() {
+		daemonIsRunningFn = origDaemon
+		gatherDoltStatusFn = origDolt
+		gatherTmuxStatusFn = origTmux
+		gatherACPStatusFn = origACP
+	})
+}
+
+func TestGatherServiceStatus_AllRunning(t *testing.T) {
+	withServiceSeams(t)
+
+	daemonIsRunningFn = func(_ string) (bool, int, error) { return true, 1234, nil }
+	gatherDoltStatusFn = func(_ string) *DoltInfo { return &DoltInfo{Running: true, PID: 5678, Port: 3307} }
+	gatherTmuxStatusFn = func(sessions map[string]bool) *TmuxInfo {
+		return &TmuxInfo{Socket: "gt", Running: true, SessionCount: len(sessions), PID: 9012}
+	}
+	gatherACPStatusFn = func(_ string) *ServiceInfo { return &ServiceInfo{Running: true, PID: 3456} }
+
+	status := &TownStatus{}
+	gatherServiceStatus(status, "/town", map[string]bool{"hq-mayor": true})
+
+	if status.Daemon == nil || !status.Daemon.Running || status.Daemon.PID != 1234 {
+		t.Errorf("daemon: got %+v, want running with PID 1234", status.Daemon)
+	}
+	if status.Dolt == nil || !status.Dolt.Running || status.Dolt.PID != 5678 {
+		t.Errorf("dolt: got %+v, want running with PID 5678", status.Dolt)
+	}
+	if status.Tmux == nil || !status.Tmux.Running || status.Tmux.PID != 9012 {
+		t.Errorf("tmux: got %+v, want running with PID 9012", status.Tmux)
+	}
+	if status.ACP == nil || !status.ACP.Running || status.ACP.PID != 3456 {
+		t.Errorf("acp: got %+v, want running with PID 3456", status.ACP)
+	}
+}
+
+func TestGatherServiceStatus_AllStopped(t *testing.T) {
+	withServiceSeams(t)
+
+	daemonIsRunningFn = func(_ string) (bool, int, error) { return false, 0, nil }
+	gatherDoltStatusFn = func(_ string) *DoltInfo { return &DoltInfo{Running: false, Port: 3307} }
+	gatherTmuxStatusFn = func(_ map[string]bool) *TmuxInfo { return &TmuxInfo{Socket: "gt", Running: false} }
+	gatherACPStatusFn = func(_ string) *ServiceInfo { return nil }
+
+	status := &TownStatus{}
+	gatherServiceStatus(status, "/town", map[string]bool{})
+
+	if status.Daemon == nil || status.Daemon.Running {
+		t.Error("daemon should be not-running")
+	}
+	if status.Dolt == nil || status.Dolt.Running {
+		t.Error("dolt should be not-running")
+	}
+	if status.ACP != nil {
+		t.Error("acp should be nil when not active")
+	}
+}
+
+func TestGatherServiceStatus_DaemonCheckError(t *testing.T) {
+	withServiceSeams(t)
+
+	daemonIsRunningFn = func(_ string) (bool, int, error) { return false, 0, fmt.Errorf("no pid file") }
+	gatherDoltStatusFn = func(_ string) *DoltInfo { return &DoltInfo{Running: true, Port: 3307} }
+	gatherTmuxStatusFn = func(_ map[string]bool) *TmuxInfo { return &TmuxInfo{Running: true} }
+	gatherACPStatusFn = func(_ string) *ServiceInfo { return nil }
+
+	status := &TownStatus{}
+	gatherServiceStatus(status, "/town", map[string]bool{"s": true})
+
+	// Daemon status should be nil when IsRunning returns an error
+	if status.Daemon != nil {
+		t.Errorf("daemon should be nil on error, got %+v", status.Daemon)
+	}
+	// Other services should still be populated
+	if status.Dolt == nil {
+		t.Error("dolt should still be populated despite daemon error")
+	}
+}
+
+func TestGatherServiceStatus_DoltRemote(t *testing.T) {
+	withServiceSeams(t)
+
+	daemonIsRunningFn = func(_ string) (bool, int, error) { return true, 100, nil }
+	gatherDoltStatusFn = func(_ string) *DoltInfo { return &DoltInfo{Remote: true, Port: 3307} }
+	gatherTmuxStatusFn = func(_ map[string]bool) *TmuxInfo { return &TmuxInfo{Running: true} }
+	gatherACPStatusFn = func(_ string) *ServiceInfo { return nil }
+
+	status := &TownStatus{}
+	gatherServiceStatus(status, "/town", map[string]bool{})
+
+	if status.Dolt == nil || !status.Dolt.Remote {
+		t.Error("dolt should be marked as remote")
+	}
+}
