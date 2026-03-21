@@ -12,7 +12,6 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/lock"
-	"github.com/steveyegge/gastown/internal/satellite"
 	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
@@ -40,7 +39,6 @@ type AgentSession struct {
 	Rig       string // For rig-specific agents
 	AgentName string // e.g., crew name, polecat name
 	Socket    string // tmux socket name this session lives on
-	Machine   string // Machine name (empty = local, set for remote agents)
 }
 
 // AgentTypeColors maps agent types to tmux color codes.
@@ -134,14 +132,12 @@ For collisions with live processes, you must manually:
 }
 
 var (
-	agentsAllFlag      bool
-	agentsAllMachines  bool
-	agentsCheckJSON    bool
+	agentsAllFlag   bool
+	agentsCheckJSON bool
 )
 
 func init() {
 	agentsCmd.PersistentFlags().BoolVarP(&agentsAllFlag, "all", "a", false, "Include polecats in the menu")
-	agentsCmd.PersistentFlags().BoolVar(&agentsAllMachines, "all-machines", false, "Include agents from satellite machines")
 	agentsCheckCmd.Flags().BoolVar(&agentsCheckJSON, "json", false, "Output as JSON")
 
 	agentsCmd.AddCommand(agentsListCmd)
@@ -328,12 +324,7 @@ func filterAndSortSessions(sessionNames []string, includePolecats bool) []*Agent
 		agents = append(agents, agent)
 	}
 
-	sortAgentSessions(agents)
-	return agents
-}
-
-// sortAgentSessions sorts agents: mayor, deacon first, then by rig, then by type.
-func sortAgentSessions(agents []*AgentSession) {
+	// Sort: mayor, deacon first, then by rig, then by type
 	sort.Slice(agents, func(i, j int) bool {
 		a, b := agents[i], agents[j]
 
@@ -361,12 +352,11 @@ func sortAgentSessions(agents []*AgentSession) {
 			return rigTypeOrder[a.Type] < rigTypeOrder[b.Type]
 		}
 
-		// Same type: alphabetical by agent name, then machine
-		if a.AgentName != b.AgentName {
-			return a.AgentName < b.AgentName
-		}
-		return a.Machine < b.Machine
+		// Same type: alphabetical by agent name
+		return a.AgentName < b.AgentName
 	})
+
+	return agents
 }
 
 // testSocketPackage extracts the package name from a gt-test-* socket name.
@@ -553,29 +543,9 @@ func runAgentsList(cmd *cobra.Command, args []string) error {
 		return fmt.Errorf("listing sessions: %w", err)
 	}
 
-	// Merge remote sessions when --all-machines is set
-	if agentsAllMachines {
-		remoteAgents, err := getRemoteAgentSessions(agentsAllFlag)
-		if err != nil {
-			fmt.Fprintf(os.Stderr, "warning: failed to enumerate remote agents: %v\n", err)
-		} else {
-			agents = append(agents, remoteAgents...)
-			sortAgentSessions(agents)
-		}
-	}
-
 	if len(agents) == 0 {
 		fmt.Println("No agent sessions running.")
 		return nil
-	}
-
-	// Determine if we have any remote agents (controls Machine column display)
-	hasRemote := false
-	for _, a := range agents {
-		if a.Machine != "" {
-			hasRemote = true
-			break
-		}
 	}
 
 	var currentRig string
@@ -590,87 +560,24 @@ func runAgentsList(cmd *cobra.Command, args []string) error {
 		}
 
 		icon := AgentTypeIcons[agent.Type]
-		machineSuffix := ""
-		if hasRemote {
-			m := agent.Machine
-			if m == "" {
-				m = "local"
-			}
-			machineSuffix = "  " + style.Dim.Render("["+m+"]")
-		}
-
 		switch agent.Type {
 		case AgentMayor:
-			fmt.Printf("  %s Mayor%s\n", icon, machineSuffix)
+			fmt.Printf("  %s Mayor\n", icon)
 		case AgentDeacon:
-			fmt.Printf("  %s Deacon%s\n", icon, machineSuffix)
+			fmt.Printf("  %s Deacon\n", icon)
 		case AgentWitness:
-			fmt.Printf("  %s witness%s\n", icon, machineSuffix)
+			fmt.Printf("  %s witness\n", icon)
 		case AgentRefinery:
-			fmt.Printf("  %s refinery%s\n", icon, machineSuffix)
+			fmt.Printf("  %s refinery\n", icon)
 		case AgentCrew:
-			fmt.Printf("  %s crew/%s%s\n", icon, agent.AgentName, machineSuffix)
+			fmt.Printf("  %s crew/%s\n", icon, agent.AgentName)
 		case AgentPolecat:
-			fmt.Printf("  %s %s%s\n", icon, agent.AgentName, machineSuffix)
+			fmt.Printf("  %s %s\n", icon, agent.AgentName)
 		}
 	}
 
 	return nil
 }
-
-// getRemoteAgentSessions enumerates agent sessions from satellite machines.
-func getRemoteAgentSessions(includePolecats bool) ([]*AgentSession, error) {
-	townRoot, err := workspace.FindFromCwdOrError()
-	if err != nil {
-		return nil, err
-	}
-
-	remoteSessions, err := satellite.EnumerateRemoteSessions(townRoot)
-	if err != nil {
-		return nil, err
-	}
-
-	var agents []*AgentSession
-	for _, rs := range remoteSessions {
-		agent := identityToAgentSession(rs.Identity, rs.RawName)
-		if agent == nil {
-			continue
-		}
-		if agent.Type == AgentPolecat && !includePolecats {
-			continue
-		}
-		agent.Machine = rs.Machine
-		agents = append(agents, agent)
-	}
-	return agents, nil
-}
-
-// identityToAgentSession converts a parsed AgentIdentity into an AgentSession.
-func identityToAgentSession(identity *session.AgentIdentity, rawName string) *AgentSession {
-	sess := &AgentSession{
-		Name:      rawName,
-		Rig:       identity.Rig,
-		AgentName: identity.Name,
-	}
-	switch identity.Role {
-	case session.RoleMayor:
-		sess.Type = AgentMayor
-	case session.RoleDeacon:
-		sess.Type = AgentDeacon
-	case session.RoleWitness:
-		sess.Type = AgentWitness
-	case session.RoleRefinery:
-		sess.Type = AgentRefinery
-	case session.RoleCrew:
-		sess.Type = AgentCrew
-	case session.RolePolecat:
-		sess.Type = AgentPolecat
-	default:
-		return nil
-	}
-	return sess
-}
-
 
 // CollisionReport holds the results of a collision check.
 type CollisionReport struct {

@@ -19,9 +19,8 @@ var (
 	crewAccount       string
 	crewAgentOverride string
 	crewAll           bool
-	crewListAll         bool
-	crewListAllMachines bool
-	crewDryRun          bool
+	crewListAll       bool
+	crewDryRun        bool
 	crewDebug         bool
 	crewReset         bool
 	crewResume        string
@@ -365,7 +364,6 @@ func init() {
 
 	crewListCmd.Flags().StringVar(&crewRig, "rig", "", "Filter by rig name")
 	crewListCmd.Flags().BoolVar(&crewListAll, "all", false, "List crew workspaces in all rigs")
-	crewListCmd.Flags().BoolVar(&crewListAllMachines, "all-machines", false, "Include crew from satellite machines")
 	crewListCmd.Flags().BoolVar(&crewJSON, "json", false, "Output as JSON")
 
 	crewAtCmd.Flags().StringVar(&crewRig, "rig", "", "Rig to use")

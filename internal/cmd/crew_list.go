@@ -9,11 +9,8 @@ import (
 	"github.com/steveyegge/gastown/internal/crew"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/rig"
-	"github.com/steveyegge/gastown/internal/satellite"
-	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // CrewListItem represents a crew worker in list output.
@@ -24,7 +21,6 @@ type CrewListItem struct {
 	Path       string `json:"path"`
 	HasSession bool   `json:"has_session"`
 	GitClean   bool   `json:"git_clean"`
-	Machine    string `json:"machine,omitempty"`
 }
 
 func runCrewList(cmd *cobra.Command, args []string) error {
@@ -90,29 +86,6 @@ func runCrewList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
-	// Merge remote crew when --all-machines is set
-	if crewListAllMachines {
-		townRoot, err := workspace.FindFromCwdOrError()
-		if err == nil {
-			remoteSessions, err := satellite.EnumerateRemoteSessions(townRoot)
-			if err != nil {
-				fmt.Fprintf(os.Stderr, "warning: failed to enumerate remote crew: %v\n", err)
-			} else {
-				for _, rs := range remoteSessions {
-					if rs.Identity.Role != session.RoleCrew {
-						continue
-					}
-					items = append(items, CrewListItem{
-						Name:       rs.Identity.Name,
-						Rig:        rs.Identity.Rig,
-						HasSession: true,
-						Machine:    rs.Machine,
-					})
-				}
-			}
-		}
-	}
-
 	if len(items) == 0 {
 		fmt.Println("No crew workspaces found.")
 		return nil
@@ -124,15 +97,6 @@ func runCrewList(cmd *cobra.Command, args []string) error {
 		return enc.Encode(items)
 	}
 
-	// Determine if we have any remote crew (controls Machine column display)
-	hasRemote := false
-	for _, item := range items {
-		if item.Machine != "" {
-			hasRemote = true
-			break
-		}
-	}
-
 	// Text output
 	fmt.Printf("%s\n\n", style.Bold.Render("Crew Workspaces"))
 	for _, item := range items {
@@ -141,27 +105,14 @@ func runCrewList(cmd *cobra.Command, args []string) error {
 			status = style.Bold.Render("●")
 		}
 
-		machineSuffix := ""
-		if hasRemote {
-			m := item.Machine
-			if m == "" {
-				m = "local"
-			}
-			machineSuffix = "  " + style.Dim.Render("["+m+"]")
+		gitStatus := style.Dim.Render("clean")
+		if !item.GitClean {
+			gitStatus = style.Bold.Render("dirty")
 		}
 
-		if item.Machine != "" {
-			// Remote crew: limited info (no branch/path/git status)
-			fmt.Printf("  %s %s/%s%s\n", status, item.Rig, item.Name, machineSuffix)
-		} else {
-			gitStatus := style.Dim.Render("clean")
-			if !item.GitClean {
-				gitStatus = style.Bold.Render("dirty")
-			}
-			fmt.Printf("  %s %s/%s%s\n", status, item.Rig, item.Name, machineSuffix)
-			fmt.Printf("    Branch: %s  Git: %s\n", item.Branch, gitStatus)
-			fmt.Printf("    %s\n", style.Dim.Render(item.Path))
-		}
+		fmt.Printf("  %s %s/%s\n", status, item.Rig, item.Name)
+		fmt.Printf("    Branch: %s  Git: %s\n", item.Branch, gitStatus)
+		fmt.Printf("    %s\n", style.Dim.Render(item.Path))
 	}
 
 	return nil
