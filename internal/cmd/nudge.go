@@ -540,21 +540,34 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 			}
 		}
 
-		// For queue/wait-idle modes, verify session exists before enqueuing.
-		// Without this, queue mode silently succeeds for nonexistent sessions —
-		// the file is written but never drained.
-		// ACP sessions are always allowed as they use queue mode.
-		if nudgeModeFlag != NudgeModeImmediate && !hasACPSessionByName(townRoot, sessionName) {
-			exists, err := t.HasSession(sessionName)
-			if err != nil {
-				return fmt.Errorf("checking session: %w", err)
-			}
-			if !exists {
-				return fmt.Errorf("session %q not found (cannot queue nudge for nonexistent session)", sessionName)
+		// Check if session exists locally. If not, try remote machines.
+		isLocal := hasACPSessionByName(townRoot, sessionName)
+		if !isLocal {
+			if exists, _ := t.HasSession(sessionName); exists {
+				isLocal = true
 			}
 		}
 
-		// Send nudge using the configured delivery mode
+		if !isLocal {
+			// Session not local — attempt cross-machine delivery via SSH.
+			if townRoot != "" {
+				if remoteMachine, err := resolveSessionMachine(townRoot, sessionName); err == nil {
+					if err := nudgeRemote(remoteMachine, sessionName, message, sender); err != nil {
+						return fmt.Errorf("remote nudge on %s: %w", remoteMachine, err)
+					}
+					fmt.Printf("%s Nudged %s/%s on %s (%s)\n", style.Bold.Render("✓"), rigName, polecatName, remoteMachine, nudgeModeFlag)
+					if townRoot, err := workspace.FindFromCwd(); err == nil && townRoot != "" {
+						_ = LogNudge(townRoot, target, message)
+					}
+					_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload(rigName, target, message))
+					return nil
+				}
+			}
+			// Not found locally or remotely
+			return fmt.Errorf("session %q not found locally or on any satellite machine", sessionName)
+		}
+
+		// Send nudge using the configured delivery mode (local)
 		if err := deliverNudge(t, sessionName, message, sender); err != nil {
 			return fmt.Errorf("nudging session: %w", err)
 		}
@@ -570,15 +583,28 @@ func runNudge(cmd *cobra.Command, args []string) (retErr error) {
 		// Raw session name (legacy)
 		// Check for ACP session - ACP agents don't have tmux sessions but can receive nudges via queue
 		hasACP := hasACPSessionByName(townRoot, target)
+		localExists := false
 
 		if !hasACP {
-			exists, err := t.HasSession(target)
-			if err != nil {
-				return fmt.Errorf("checking session: %w", err)
+			if exists, _ := t.HasSession(target); exists {
+				localExists = true
 			}
-			if !exists {
-				return fmt.Errorf("session %q not found", target)
+		}
+
+		if !hasACP && !localExists {
+			// Not local — try remote machines
+			if townRoot != "" {
+				if remoteMachine, err := resolveSessionMachine(townRoot, target); err == nil {
+					if err := nudgeRemote(remoteMachine, target, message, sender); err != nil {
+						return fmt.Errorf("remote nudge on %s: %w", remoteMachine, err)
+					}
+					fmt.Printf("✓ Nudged %s on %s (%s)\n", target, remoteMachine, nudgeModeFlag)
+					_ = LogNudge(townRoot, target, message)
+					_ = events.LogFeed(events.TypeNudge, sender, events.NudgePayload("", target, message))
+					return nil
+				}
 			}
+			return fmt.Errorf("session %q not found locally or on any satellite machine", target)
 		}
 
 		if err := deliverNudge(t, target, message, sender); err != nil {
@@ -889,4 +915,63 @@ func addressToAgentBeadID(address string) string {
 		}
 		return session.PolecatSessionName(session.PrefixFor(rig), role)
 	}
+}
+
+// resolveSessionMachine finds which satellite machine hosts a given tmux session.
+// Returns the machine name or error if not found on any machine.
+func resolveSessionMachine(townRoot, sessionName string) (string, error) {
+	machinesPath := constants.MayorMachinesPath(townRoot)
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return "", err
+	}
+
+	for _, rs := range listAllRemoteSessions(machines) {
+		if rs.RawName == sessionName {
+			return rs.Machine, nil
+		}
+	}
+	return "", fmt.Errorf("session %q not found on any satellite machine", sessionName)
+}
+
+// nudgeRemote delivers a nudge to a session on a remote machine via SSH.
+// Runs `gt nudge <session> -m <message> --mode=<mode>` on the remote machine,
+// reusing the full local nudge protocol on the remote side.
+func nudgeRemote(machineName, sessionName, message, sender string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return err
+	}
+
+	machinesPath := constants.MayorMachinesPath(townRoot)
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return err
+	}
+
+	entry, ok := machines.Machines[machineName]
+	if !ok {
+		return fmt.Errorf("machine %q not found", machineName)
+	}
+
+	// Build remote gt nudge command. Use the raw session name so the remote
+	// side doesn't need to re-resolve the address. Quote the message for shell safety.
+	gtBin := entry.GtBinary
+	if gtBin == "" {
+		gtBin = "gt"
+	}
+	remoteCmd := fmt.Sprintf("%s nudge %s -m %s --mode=%s",
+		gtBin,
+		shellQuote(sessionName),
+		shellQuote(fmt.Sprintf("[from %s] %s", sender, message)),
+		nudgeModeFlag,
+	)
+
+	_, err = runSSH(entry.SSHTarget(), remoteCmd, 30*time.Second)
+	return err
+}
+
+// shellQuote wraps a string in single quotes for safe shell embedding.
+func shellQuote(s string) string {
+	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
 }
