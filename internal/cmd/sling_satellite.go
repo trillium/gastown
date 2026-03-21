@@ -229,6 +229,56 @@ func countRemotePolecats(machines *config.MachinesConfig, workerNames []string) 
 	return counts
 }
 
+// remoteAgentSession represents a parsed tmux session from a remote machine.
+type remoteAgentSession struct {
+	Machine  string
+	Identity *session.AgentIdentity
+	RawName  string
+}
+
+// listAllRemoteSessions SSHes to each enabled machine in parallel and returns
+// all parsed tmux sessions. Machines that fail SSH are silently skipped.
+func listAllRemoteSessions(machines *config.MachinesConfig) []remoteAgentSession {
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	var all []remoteAgentSession
+
+	for name, entry := range machines.Machines {
+		if !entry.Enabled {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, entry *config.MachineEntry) {
+			defer wg.Done()
+			target := entry.SSHTarget()
+			out, err := runSSH(target, "tmux -L gt list-sessions -F '#{session_name}' 2>/dev/null || true", 10*time.Second)
+			if err != nil {
+				return
+			}
+			var sessions []remoteAgentSession
+			for _, line := range strings.Split(strings.TrimSpace(out), "\n") {
+				if line == "" {
+					continue
+				}
+				identity, err := session.ParseSessionName(line)
+				if err != nil {
+					continue
+				}
+				sessions = append(sessions, remoteAgentSession{
+					Machine:  name,
+					Identity: identity,
+					RawName:  line,
+				})
+			}
+			mu.Lock()
+			all = append(all, sessions...)
+			mu.Unlock()
+		}(name, entry)
+	}
+	wg.Wait()
+	return all
+}
+
 // countRemotePolecatsOnMachine SSHes to a single machine and counts polecat sessions.
 func countRemotePolecatsOnMachine(entry *config.MachineEntry) (int, error) {
 	target := entry.SSHTarget()
