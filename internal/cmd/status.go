@@ -964,6 +964,15 @@ func discoverLiveSessions(t *tmux.Tmux) map[string]bool {
 	return allSessions
 }
 
+// beadsLoader is an interface for loading agent beads, enabling test stubs.
+type beadsLoader interface {
+	ListAgentBeads() (map[string]*beads.Issue, error)
+	ShowMultiple(ids []string) (map[string]*beads.Issue, error)
+}
+
+// newBeadsLoaderFn creates a beadsLoader for a given path. Seam for tests.
+var newBeadsLoaderFn = func(path string) beadsLoader { return beads.New(path) }
+
 // prefetchAgentBeads loads agent and hook beads from all rig-specific and town-level
 // beads databases in parallel.
 func prefetchAgentBeads(townRoot string, rigs []*rig.Rig) (map[string]*beads.Issue, map[string]*beads.Issue) {
@@ -987,7 +996,7 @@ func prefetchAgentBeads(townRoot string, rigs []*rig.Rig) (map[string]*beads.Iss
 	}
 
 	// fetchHookBeads extracts hook IDs from agent beads and fetches them.
-	fetchHookBeads := func(client *beads.Beads, agentBeads map[string]*beads.Issue) {
+	fetchHookBeads := func(client beadsLoader, agentBeads map[string]*beads.Issue) {
 		var hookIDs []string
 		for _, issue := range agentBeads {
 			hookID := issue.HookBead
@@ -1014,10 +1023,10 @@ func prefetchAgentBeads(townRoot string, rigs []*rig.Rig) (map[string]*beads.Iss
 	go func() {
 		defer wg.Done()
 		townBeadsPath := beads.GetTownBeadsPath(townRoot)
-		townBeadsClient := beads.New(townBeadsPath)
-		townAgentBeads, _ := townBeadsClient.ListAgentBeads()
+		client := newBeadsLoaderFn(townBeadsPath)
+		townAgentBeads, _ := client.ListAgentBeads()
 		mergeAgentBeads(townAgentBeads)
-		fetchHookBeads(townBeadsClient, townAgentBeads)
+		fetchHookBeads(client, townAgentBeads)
 	}()
 
 	// Rig-level agent beads
@@ -1026,13 +1035,13 @@ func prefetchAgentBeads(townRoot string, rigs []*rig.Rig) (map[string]*beads.Iss
 		go func(r *rig.Rig) {
 			defer wg.Done()
 			rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
-			rigBeadsClient := beads.New(rigBeadsPath)
-			rigAgentBeads, _ := rigBeadsClient.ListAgentBeads()
+			client := newBeadsLoaderFn(rigBeadsPath)
+			rigAgentBeads, _ := client.ListAgentBeads()
 			if rigAgentBeads == nil {
 				return
 			}
 			mergeAgentBeads(rigAgentBeads)
-			fetchHookBeads(rigBeadsClient, rigAgentBeads)
+			fetchHookBeads(client, rigAgentBeads)
 		}(r)
 	}
 
