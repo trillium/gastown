@@ -791,31 +791,7 @@ func gatherStatus() (TownStatus, error) {
 	// Create tmux instance for runtime checks
 	t := tmux.NewTmux()
 
-	// Pre-fetch all tmux sessions and verify agent liveness for O(1) lookup.
-	// A Gas Town session is only considered "running" if the agent process is
-	// alive inside it, not merely if the tmux session exists. This prevents
-	// zombie sessions (tmux alive, agent dead) from showing as running.
-	// See: gt-bd6i3
-	allSessions := make(map[string]bool)
-	if sessions, err := t.ListSessions(); err == nil {
-		var sessionMu sync.Mutex
-		var sessionWg sync.WaitGroup
-		for _, s := range sessions {
-			if session.IsKnownSession(s) {
-				sessionWg.Add(1)
-				go func(name string) {
-					defer sessionWg.Done()
-					alive := t.IsAgentAlive(name)
-					sessionMu.Lock()
-					allSessions[name] = alive
-					sessionMu.Unlock()
-				}(s)
-			} else {
-				allSessions[s] = true
-			}
-		}
-		sessionWg.Wait()
-	}
+	allSessions := discoverLiveSessions(t)
 
 	// Discover rigs
 	rigs, err := mgr.DiscoverRigs()
@@ -823,96 +799,7 @@ func gatherStatus() (TownStatus, error) {
 		return TownStatus{}, fmt.Errorf("discovering rigs: %w", err)
 	}
 
-	// Pre-fetch agent beads across all rig-specific beads DBs.
-	// In --fast mode, parallelize these fetches for better performance.
-	allAgentBeads := make(map[string]*beads.Issue)
-	allHookBeads := make(map[string]*beads.Issue)
-	var beadsMu sync.Mutex // Protects allAgentBeads and allHookBeads
-
-	// Helper to safely merge beads into the shared maps
-	mergeAgentBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allAgentBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
-	mergeHookBeads := func(beadsMap map[string]*beads.Issue) {
-		beadsMu.Lock()
-		for id, issue := range beadsMap {
-			allHookBeads[id] = issue
-		}
-		beadsMu.Unlock()
-	}
-
-	var beadsWg sync.WaitGroup
-
-	// Fetch town-level agent beads (Mayor, Deacon) from town beads
-	townBeadsPath := beads.GetTownBeadsPath(townRoot)
-	beadsWg.Add(1)
-	go func() {
-		defer beadsWg.Done()
-		townBeadsClient := beads.New(townBeadsPath)
-		townAgentBeads, _ := townBeadsClient.ListAgentBeads()
-		mergeAgentBeads(townAgentBeads)
-
-		// Fetch hook beads from town beads
-		var townHookIDs []string
-		for _, issue := range townAgentBeads {
-			hookID := issue.HookBead
-			if hookID == "" {
-				fields := beads.ParseAgentFields(issue.Description)
-				if fields != nil {
-					hookID = fields.HookBead
-				}
-			}
-			if hookID != "" {
-				townHookIDs = append(townHookIDs, hookID)
-			}
-		}
-		if len(townHookIDs) > 0 {
-			townHookBeads, _ := townBeadsClient.ShowMultiple(townHookIDs)
-			mergeHookBeads(townHookBeads)
-		}
-	}()
-
-	// Fetch rig-level agent beads in parallel
-	for _, r := range rigs {
-		beadsWg.Add(1)
-		go func(r *rig.Rig) {
-			defer beadsWg.Done()
-			rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
-			rigBeads := beads.New(rigBeadsPath)
-			rigAgentBeads, _ := rigBeads.ListAgentBeads()
-			if rigAgentBeads == nil {
-				return
-			}
-			mergeAgentBeads(rigAgentBeads)
-
-			var hookIDs []string
-			for _, issue := range rigAgentBeads {
-				// Use the HookBead field from the database column; fall back for legacy beads.
-				hookID := issue.HookBead
-				if hookID == "" {
-					fields := beads.ParseAgentFields(issue.Description)
-					if fields != nil {
-						hookID = fields.HookBead
-					}
-				}
-				if hookID != "" {
-					hookIDs = append(hookIDs, hookID)
-				}
-			}
-
-			if len(hookIDs) == 0 {
-				return
-			}
-			hookBeads, _ := rigBeads.ShowMultiple(hookIDs)
-			mergeHookBeads(hookBeads)
-		}(r)
-	}
-
-	beadsWg.Wait()
+	allAgentBeads, allHookBeads := prefetchAgentBeads(townRoot, rigs)
 
 	// Create mail router for inbox lookups
 	mailRouter := mail.NewRouter(townRoot)
@@ -944,66 +831,7 @@ func gatherStatus() (TownStatus, error) {
 		Rigs:     make([]RigStatus, len(rigs)),
 	}
 
-	// Daemon status
-	if daemonRunning, daemonPid, err := daemon.IsRunning(townRoot); err == nil {
-		status.Daemon = &ServiceInfo{Running: daemonRunning, PID: daemonPid}
-	}
-
-	// Dolt status
-	doltCfg := doltserver.DefaultConfig(townRoot)
-	if doltCfg.IsRemote() {
-		status.Dolt = &DoltInfo{Remote: true, Port: doltCfg.Port}
-	} else {
-		doltRunning, doltPid, _ := doltserver.IsRunning(townRoot)
-		port := doltCfg.Port
-		if doltRunning {
-			// Read the actual port from state — doltCfg.Port comes from
-			// DefaultConfig which reads GT_DOLT_PORT from the shell env,
-			// but gt status is typically run without that env var set.
-			if state, err := doltserver.LoadState(townRoot); err == nil && state.Port > 0 {
-				port = state.Port
-			}
-		}
-		doltInfo := &DoltInfo{
-			Running: doltRunning,
-			PID:     doltPid,
-			Port:    port,
-			DataDir: doltCfg.DataDir,
-		}
-		// Check if port is held by another town's Dolt
-		if !doltRunning {
-			if conflictPid, conflictDir := doltserver.CheckPortConflict(townRoot); conflictPid > 0 {
-				doltInfo.PortConflict = true
-				doltInfo.ConflictOwner = conflictDir
-			}
-		}
-		status.Dolt = doltInfo
-	}
-
-	// Tmux status
-	socket := tmux.GetDefaultSocket()
-	socketLabel := "default"
-	if socket != "" {
-		socketLabel = socket
-	}
-	tmuxInfo := &TmuxInfo{
-		Socket:       socketLabel,
-		SessionCount: len(allSessions),
-		Running:      len(allSessions) > 0,
-	}
-	// Resolve socket path: /tmp/tmux-<UID>/<socket>
-	tmuxInfo.SocketPath = filepath.Join(tmux.SocketDir(), socketLabel)
-	if _, err := os.Stat(tmuxInfo.SocketPath); err == nil {
-		tmuxInfo.Running = true
-		tmuxInfo.PID = tmux.NewTmux().ServerPID()
-	}
-	status.Tmux = tmuxInfo
-
-	// ACP status
-	if mayor.IsACPActive(townRoot) {
-		acpPid, _ := mayor.GetACPPid(townRoot)
-		status.ACP = &ServiceInfo{Running: true, PID: acpPid}
-	}
+	gatherServiceStatus(&status, townRoot, allSessions)
 
 	var wg sync.WaitGroup
 
@@ -1099,6 +927,170 @@ func gatherStatus() (TownStatus, error) {
 	status.Summary.RigCount = len(rigs)
 
 	return status, nil
+}
+
+// discoverLiveSessions pre-fetches all tmux sessions and verifies agent liveness.
+// A Gas Town session is only considered "running" if the agent process is alive
+// inside it, not merely if the tmux session exists. See: gt-bd6i3
+func discoverLiveSessions(t *tmux.Tmux) map[string]bool {
+	allSessions := make(map[string]bool)
+	sessions, err := t.ListSessions()
+	if err != nil {
+		return allSessions
+	}
+	var mu sync.Mutex
+	var wg sync.WaitGroup
+	for _, s := range sessions {
+		if session.IsKnownSession(s) {
+			wg.Add(1)
+			go func(name string) {
+				defer wg.Done()
+				alive := t.IsAgentAlive(name)
+				mu.Lock()
+				allSessions[name] = alive
+				mu.Unlock()
+			}(s)
+		} else {
+			allSessions[s] = true
+		}
+	}
+	wg.Wait()
+	return allSessions
+}
+
+// prefetchAgentBeads loads agent and hook beads from all rig-specific and town-level
+// beads databases in parallel.
+func prefetchAgentBeads(townRoot string, rigs []*rig.Rig) (map[string]*beads.Issue, map[string]*beads.Issue) {
+	allAgentBeads := make(map[string]*beads.Issue)
+	allHookBeads := make(map[string]*beads.Issue)
+	var mu sync.Mutex
+
+	mergeAgentBeads := func(beadsMap map[string]*beads.Issue) {
+		mu.Lock()
+		for id, issue := range beadsMap {
+			allAgentBeads[id] = issue
+		}
+		mu.Unlock()
+	}
+	mergeHookBeads := func(beadsMap map[string]*beads.Issue) {
+		mu.Lock()
+		for id, issue := range beadsMap {
+			allHookBeads[id] = issue
+		}
+		mu.Unlock()
+	}
+
+	// fetchHookBeads extracts hook IDs from agent beads and fetches them.
+	fetchHookBeads := func(client *beads.Beads, agentBeads map[string]*beads.Issue) {
+		var hookIDs []string
+		for _, issue := range agentBeads {
+			hookID := issue.HookBead
+			if hookID == "" {
+				fields := beads.ParseAgentFields(issue.Description)
+				if fields != nil {
+					hookID = fields.HookBead
+				}
+			}
+			if hookID != "" {
+				hookIDs = append(hookIDs, hookID)
+			}
+		}
+		if len(hookIDs) > 0 {
+			hookBeads, _ := client.ShowMultiple(hookIDs)
+			mergeHookBeads(hookBeads)
+		}
+	}
+
+	var wg sync.WaitGroup
+
+	// Town-level agent beads
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		townBeadsPath := beads.GetTownBeadsPath(townRoot)
+		townBeadsClient := beads.New(townBeadsPath)
+		townAgentBeads, _ := townBeadsClient.ListAgentBeads()
+		mergeAgentBeads(townAgentBeads)
+		fetchHookBeads(townBeadsClient, townAgentBeads)
+	}()
+
+	// Rig-level agent beads
+	for _, r := range rigs {
+		wg.Add(1)
+		go func(r *rig.Rig) {
+			defer wg.Done()
+			rigBeadsPath := filepath.Join(r.Path, "mayor", "rig")
+			rigBeadsClient := beads.New(rigBeadsPath)
+			rigAgentBeads, _ := rigBeadsClient.ListAgentBeads()
+			if rigAgentBeads == nil {
+				return
+			}
+			mergeAgentBeads(rigAgentBeads)
+			fetchHookBeads(rigBeadsClient, rigAgentBeads)
+		}(r)
+	}
+
+	wg.Wait()
+	return allAgentBeads, allHookBeads
+}
+
+// gatherServiceStatus populates daemon, dolt, tmux, and ACP service info on the status.
+func gatherServiceStatus(status *TownStatus, townRoot string, allSessions map[string]bool) {
+	// Daemon
+	if daemonRunning, daemonPid, err := daemon.IsRunning(townRoot); err == nil {
+		status.Daemon = &ServiceInfo{Running: daemonRunning, PID: daemonPid}
+	}
+
+	// Dolt
+	doltCfg := doltserver.DefaultConfig(townRoot)
+	if doltCfg.IsRemote() {
+		status.Dolt = &DoltInfo{Remote: true, Port: doltCfg.Port}
+	} else {
+		doltRunning, doltPid, _ := doltserver.IsRunning(townRoot)
+		port := doltCfg.Port
+		if doltRunning {
+			if state, err := doltserver.LoadState(townRoot); err == nil && state.Port > 0 {
+				port = state.Port
+			}
+		}
+		doltInfo := &DoltInfo{
+			Running: doltRunning,
+			PID:     doltPid,
+			Port:    port,
+			DataDir: doltCfg.DataDir,
+		}
+		if !doltRunning {
+			if conflictPid, conflictDir := doltserver.CheckPortConflict(townRoot); conflictPid > 0 {
+				doltInfo.PortConflict = true
+				doltInfo.ConflictOwner = conflictDir
+			}
+		}
+		status.Dolt = doltInfo
+	}
+
+	// Tmux
+	socket := tmux.GetDefaultSocket()
+	socketLabel := "default"
+	if socket != "" {
+		socketLabel = socket
+	}
+	tmuxInfo := &TmuxInfo{
+		Socket:       socketLabel,
+		SessionCount: len(allSessions),
+		Running:      len(allSessions) > 0,
+	}
+	tmuxInfo.SocketPath = filepath.Join(tmux.SocketDir(), socketLabel)
+	if _, err := os.Stat(tmuxInfo.SocketPath); err == nil {
+		tmuxInfo.Running = true
+		tmuxInfo.PID = tmux.NewTmux().ServerPID()
+	}
+	status.Tmux = tmuxInfo
+
+	// ACP
+	if mayor.IsACPActive(townRoot) {
+		acpPid, _ := mayor.GetACPPid(townRoot)
+		status.ACP = &ServiceInfo{Running: true, PID: acpPid}
+	}
 }
 
 func outputStatusJSON(status TownStatus) error {
