@@ -5,9 +5,12 @@ import (
 	"fmt"
 	"os"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/spf13/cobra"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/mail"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/witness"
@@ -148,19 +151,15 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 
 	timestamp := time.Now().UTC().Format(time.RFC3339)
 
-	// Run all three detection passes.
-	// Note: DetectZombiePolecats takes a router param but does NOT send mail
-	// internally — it only uses the router for workspace context. Notifications
-	// are sent exclusively below via --notify, avoiding double-send.
+	// Run all three detection passes locally.
 	zombieResult := witness.DetectZombiePolecats(bd, workDir, rigName, router)
 	stallResult := witness.DetectStalledPolecats(workDir, rigName)
 	completionResult := witness.DiscoverCompletions(bd, workDir, rigName, router)
-
-	// Build patrol receipts for zombies
 	receipts := witness.BuildPatrolReceipts(rigName, zombieResult)
 
-	// Send notifications only when explicitly requested via --notify.
-	// The library detection functions do not send mail themselves.
+	// Automatically scan satellites if machines.json exists.
+	remoteResults := scanSatellites(townRoot)
+
 	if patrolScanNotify && zombieResult != nil {
 		activeZombies := countActiveWorkZombies(zombieResult)
 		if activeZombies > 0 {
@@ -169,10 +168,10 @@ func runPatrolScan(cmd *cobra.Command, args []string) error {
 	}
 
 	if patrolScanJSON {
-		return outputPatrolScanJSON(rigName, timestamp, zombieResult, stallResult, completionResult, receipts)
+		return outputPatrolScanJSONWithSatellites(rigName, timestamp, zombieResult, stallResult, completionResult, receipts, remoteResults)
 	}
 
-	return outputPatrolScanHuman(rigName, zombieResult, stallResult, completionResult, receipts)
+	return outputPatrolScanHumanWithSatellites(rigName, zombieResult, stallResult, completionResult, receipts, remoteResults)
 }
 
 func countActiveWorkZombies(result *witness.DetectZombiePolecatsResult) int {
@@ -214,91 +213,104 @@ func sendZombieNotification(router *mail.Router, rigName string, result *witness
 	_ = router.Send(msg)
 }
 
-func outputPatrolScanJSON(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt) error {
-	output := PatrolScanOutput{
-		Rig:       rigName,
-		Timestamp: timestamp,
-		Receipts:  receipts,
-	}
-
-	// Zombies
-	if zombieResult != nil {
-		zo := &PatrolScanZombieOutput{
-			Checked: zombieResult.Checked,
-			Found:   len(zombieResult.Zombies),
-		}
-		for _, z := range zombieResult.Zombies {
-			item := PatrolScanZombieItem{
-				Polecat:        z.PolecatName,
-				Classification: string(z.Classification),
-				AgentState:     z.AgentState,
-				HookBead:       z.HookBead,
-				CleanupStatus:  z.CleanupStatus,
-				Action:         z.Action,
-				WasActive:      z.WasActive,
-			}
-			if z.Error != nil {
-				item.Error = z.Error.Error()
-			}
-			zo.Zombies = append(zo.Zombies, item)
-		}
-		for _, e := range zombieResult.Errors {
-			zo.Errors = append(zo.Errors, e.Error())
-		}
-		output.Zombies = zo
-	}
-
-	// Stalls
-	if stallResult != nil {
-		so := &PatrolScanStallOutput{
-			Checked: stallResult.Checked,
-			Found:   len(stallResult.Stalled),
-		}
-		for _, s := range stallResult.Stalled {
-			item := PatrolScanStallItem{
-				Polecat:   s.PolecatName,
-				StallType: s.StallType,
-				Action:    s.Action,
-			}
-			if s.Error != nil {
-				item.Error = s.Error.Error()
-			}
-			so.Stalls = append(so.Stalls, item)
-		}
-		output.Stalls = so
-	}
-
-	// Completions
-	if completionResult != nil {
-		co := &PatrolScanCompleteOutput{
-			Checked: completionResult.Checked,
-			Found:   len(completionResult.Discovered),
-		}
-		for _, d := range completionResult.Discovered {
-			item := PatrolScanCompleteItem{
-				Polecat:        d.PolecatName,
-				ExitType:       d.ExitType,
-				IssueID:        d.IssueID,
-				MRID:           d.MRID,
-				Branch:         d.Branch,
-				Action:         d.Action,
-				WispCreated:    d.WispCreated,
-				CompletionTime: d.CompletionTime,
-			}
-			co.Completed = append(co.Completed, item)
-		}
-		output.Completions = co
-	}
-
-	enc := json.NewEncoder(os.Stdout)
-	enc.SetIndent("", "  ")
-	return enc.Encode(output)
+// SatelliteScanResult holds scan results from one satellite machine.
+type SatelliteScanResult struct {
+	Machine string            `json:"machine"`
+	Scan    *PatrolScanOutput `json:"scan,omitempty"`
+	Error   string            `json:"error,omitempty"`
 }
 
-func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, _ []witness.PatrolReceipt) error {
+// scanSatellites runs `gt patrol scan --json` on all enabled satellites via SSH.
+// Returns nil if no machines.json exists (single-machine setup). Each satellite
+// detects AND restarts zombies locally — this just collects the results.
+func scanSatellites(townRoot string) []SatelliteScanResult {
+	machinesPath := constants.MayorMachinesPath(townRoot)
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return nil // No machines config = single-machine setup
+	}
+
+	type result struct {
+		name string
+		scan *PatrolScanOutput
+		err  error
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan result, len(machines.Machines))
+
+	for name, entry := range machines.Machines {
+		if !entry.Enabled {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, entry *config.MachineEntry) {
+			defer wg.Done()
+			gtBin := entry.GtBinary
+			if gtBin == "" {
+				gtBin = "gt"
+			}
+			remoteCmd := gtBin + " patrol scan --json"
+			if patrolScanRig != "" {
+				remoteCmd += " --rig " + config.ShellQuote(patrolScanRig)
+			}
+			if patrolScanNotify {
+				remoteCmd += " --notify"
+			}
+			out, err := runSSH(entry.SSHTarget(), remoteCmd, 30*time.Second)
+			if err != nil {
+				results <- result{name: name, err: err}
+				return
+			}
+			var scan PatrolScanOutput
+			if err := json.Unmarshal([]byte(out), &scan); err != nil {
+				results <- result{name: name, err: fmt.Errorf("parsing scan JSON: %w", err)}
+				return
+			}
+			results <- result{name: name, scan: &scan}
+		}(name, entry)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	var satellite []SatelliteScanResult
+	for r := range results {
+		sr := SatelliteScanResult{Machine: r.name}
+		if r.err != nil {
+			sr.Error = r.err.Error()
+		} else {
+			sr.Scan = r.scan
+		}
+		satellite = append(satellite, sr)
+	}
+	return satellite
+}
+
+func outputPatrolScanJSONWithSatellites(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt, satellites []SatelliteScanResult) error {
+	output := buildPatrolScanOutput(rigName, timestamp, zombieResult, stallResult, completionResult, receipts)
+	if len(satellites) == 0 {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(output)
+	}
+
+	// Wrap in fleet structure when satellites are present
+	type fleetOutput struct {
+		Local      *PatrolScanOutput     `json:"local"`
+		Satellites []SatelliteScanResult `json:"satellites"`
+	}
+	enc := json.NewEncoder(os.Stdout)
+	enc.SetIndent("", "  ")
+	return enc.Encode(fleetOutput{Local: output, Satellites: satellites})
+}
+
+func outputPatrolScanHumanWithSatellites(rigName string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, _ []witness.PatrolReceipt, satellites []SatelliteScanResult) error {
+	// Print local results using existing format
 	fmt.Printf("%s Patrol scan: %s\n\n", style.Bold.Render("🔍"), rigName)
 
-	// Zombies
 	if zombieResult != nil {
 		fmt.Printf("%s Zombie Detection: checked %d polecat(s)\n",
 			style.Bold.Render("👻"), zombieResult.Checked)
@@ -340,7 +352,6 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
-	// Stalls
 	if stallResult != nil && (len(stallResult.Stalled) > 0 || patrolScanVerbose) {
 		fmt.Printf("%s Stall Detection: checked %d polecat(s)\n",
 			style.Bold.Render("⏳"), stallResult.Checked)
@@ -358,7 +369,6 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
-	// Completions
 	if completionResult != nil && (len(completionResult.Discovered) > 0 || patrolScanVerbose) {
 		fmt.Printf("%s Completion Discovery: checked %d polecat(s)\n",
 			style.Bold.Render("✅"), completionResult.Checked)
@@ -381,7 +391,7 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 		fmt.Println()
 	}
 
-	// Summary
+	// Local summary
 	zombieCount := 0
 	activeCount := 0
 	if zombieResult != nil {
@@ -404,5 +414,139 @@ func outputPatrolScanHuman(rigName string, zombieResult *witness.DetectZombiePol
 			zombieCount, activeCount, stallCount, completionCount)
 	}
 
+	// Satellite results (printed automatically when present)
+	if len(satellites) > 0 {
+		fmt.Printf("\n%s\n", style.Bold.Render("Satellites"))
+		for _, sr := range satellites {
+			fmt.Printf("\n── %s ──\n", style.Bold.Render(sr.Machine))
+			if sr.Error != "" {
+				fmt.Printf("  %s %s\n", style.Error.Render("✗"), sr.Error)
+				continue
+			}
+			printPatrolScanSummary(sr.Scan)
+		}
+	}
+
 	return nil
+}
+
+// buildPatrolScanOutput constructs a PatrolScanOutput from detection results.
+func buildPatrolScanOutput(rigName, timestamp string, zombieResult *witness.DetectZombiePolecatsResult, stallResult *witness.DetectStalledPolecatsResult, completionResult *witness.DiscoverCompletionsResult, receipts []witness.PatrolReceipt) *PatrolScanOutput {
+	output := &PatrolScanOutput{
+		Rig:       rigName,
+		Timestamp: timestamp,
+		Receipts:  receipts,
+	}
+
+	if zombieResult != nil {
+		zo := &PatrolScanZombieOutput{
+			Checked: zombieResult.Checked,
+			Found:   len(zombieResult.Zombies),
+		}
+		for _, z := range zombieResult.Zombies {
+			item := PatrolScanZombieItem{
+				Polecat:        z.PolecatName,
+				Classification: string(z.Classification),
+				AgentState:     z.AgentState,
+				HookBead:       z.HookBead,
+				CleanupStatus:  z.CleanupStatus,
+				Action:         z.Action,
+				WasActive:      z.WasActive,
+			}
+			if z.Error != nil {
+				item.Error = z.Error.Error()
+			}
+			zo.Zombies = append(zo.Zombies, item)
+		}
+		for _, e := range zombieResult.Errors {
+			zo.Errors = append(zo.Errors, e.Error())
+		}
+		output.Zombies = zo
+	}
+
+	if stallResult != nil {
+		so := &PatrolScanStallOutput{
+			Checked: stallResult.Checked,
+			Found:   len(stallResult.Stalled),
+		}
+		for _, s := range stallResult.Stalled {
+			item := PatrolScanStallItem{
+				Polecat:   s.PolecatName,
+				StallType: s.StallType,
+				Action:    s.Action,
+			}
+			if s.Error != nil {
+				item.Error = s.Error.Error()
+			}
+			so.Stalls = append(so.Stalls, item)
+		}
+		output.Stalls = so
+	}
+
+	if completionResult != nil {
+		co := &PatrolScanCompleteOutput{
+			Checked: completionResult.Checked,
+			Found:   len(completionResult.Discovered),
+		}
+		for _, d := range completionResult.Discovered {
+			co.Completed = append(co.Completed, PatrolScanCompleteItem{
+				Polecat:        d.PolecatName,
+				ExitType:       d.ExitType,
+				IssueID:        d.IssueID,
+				MRID:           d.MRID,
+				Branch:         d.Branch,
+				Action:         d.Action,
+				WispCreated:    d.WispCreated,
+				CompletionTime: d.CompletionTime,
+			})
+		}
+		output.Completions = co
+	}
+
+	return output
+}
+
+// printPatrolScanSummary displays a compact summary of a patrol scan result.
+func printPatrolScanSummary(scan *PatrolScanOutput) {
+	if scan == nil {
+		fmt.Printf("  %s no data\n", style.Dim.Render("—"))
+		return
+	}
+
+	zombieCount := 0
+	activeCount := 0
+	if scan.Zombies != nil {
+		zombieCount = scan.Zombies.Found
+		for _, z := range scan.Zombies.Zombies {
+			if z.WasActive {
+				activeCount++
+			}
+		}
+	}
+
+	stallCount := 0
+	if scan.Stalls != nil {
+		stallCount = scan.Stalls.Found
+	}
+
+	completionCount := 0
+	if scan.Completions != nil {
+		completionCount = scan.Completions.Found
+	}
+
+	if zombieCount == 0 && stallCount == 0 && completionCount == 0 {
+		fmt.Printf("  %s all clear (checked %d)\n", style.Success.Render("✓"), scan.Zombies.Checked)
+		return
+	}
+
+	fmt.Printf("  rig: %s  zombies: %d (%d active)  stalls: %d  completions: %d\n",
+		scan.Rig, zombieCount, activeCount, stallCount, completionCount)
+
+	for _, z := range scan.Zombies.Zombies {
+		icon := "⚠"
+		if z.WasActive {
+			icon = "🚨"
+		}
+		fmt.Printf("    %s %s: %s → %s\n", icon, z.Polecat, z.Classification, z.Action)
+	}
 }
