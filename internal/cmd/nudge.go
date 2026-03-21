@@ -962,8 +962,8 @@ func nudgeRemote(machineName, sessionName, message, sender string) error {
 	}
 	remoteCmd := fmt.Sprintf("%s nudge %s -m %s --mode=%s",
 		gtBin,
-		shellQuote(sessionName),
-		shellQuote(fmt.Sprintf("[from %s] %s", sender, message)),
+		config.ShellQuote(sessionName),
+		config.ShellQuote(fmt.Sprintf("[from %s] %s", sender, message)),
 		nudgeModeFlag,
 	)
 
@@ -971,7 +971,3 @@ func nudgeRemote(machineName, sessionName, message, sender string) error {
 	return err
 }
 
-// shellQuote wraps a string in single quotes for safe shell embedding.
-func shellQuote(s string) string {
-	return "'" + strings.ReplaceAll(s, "'", "'\\''") + "'"
-}
