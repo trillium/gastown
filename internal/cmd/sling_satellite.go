@@ -784,12 +784,14 @@ func startRemoteSatelliteSession(
 	return nil
 }
 
-// runSSH executes a command on a remote machine via SSH.
-func runSSH(sshTarget, remoteCmd string, timeout time.Duration) (string, error) {
+// runSSH is a package-level function variable for executing commands on remote machines via SSH.
+// It is a seam for tests — swap it to avoid real SSH calls in unit tests.
+var runSSH = func(sshTarget, remoteCmd string, timeout time.Duration) (string, error) {
 	return gssh.Run(sshTarget, remoteCmd, timeout)
 }
 
-// runSSHWithStdin executes a command on a remote machine via SSH, optionally piping stdin.
-func runSSHWithStdin(sshTarget, remoteCmd string, stdin []byte, timeout time.Duration) (string, error) {
+// runSSHWithStdin is a package-level function variable for executing commands on remote machines
+// via SSH with optional stdin. It is a seam for tests.
+var runSSHWithStdin = func(sshTarget, remoteCmd string, stdin []byte, timeout time.Duration) (string, error) {
 	return gssh.RunWithStdin(sshTarget, remoteCmd, stdin, timeout)
 }
