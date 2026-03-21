@@ -141,6 +141,13 @@ Examples:
 	RunE: runDaemonClearBackoff,
 }
 
+var daemonCheckpointCycleCmd = &cobra.Command{
+	Use:    "checkpoint-cycle",
+	Short:  "Run one checkpoint cycle (internal, used by satellite orchestration)",
+	Hidden: true,
+	RunE:   runDaemonCheckpointCycle,
+}
+
 var (
 	daemonLogLines  int
 	daemonLogFollow bool
@@ -155,6 +162,7 @@ func init() {
 	daemonCmd.AddCommand(daemonEnableSupervisorCmd)
 	daemonCmd.AddCommand(daemonClearBackoffCmd)
 	daemonCmd.AddCommand(daemonRotateLogsCmd)
+	daemonCmd.AddCommand(daemonCheckpointCycleCmd)
 
 	daemonLogsCmd.Flags().IntVarP(&daemonLogLines, "lines", "n", 50, "Number of lines to show")
 	daemonLogsCmd.Flags().BoolVarP(&daemonLogFollow, "follow", "f", false, "Follow log output")
@@ -439,5 +447,23 @@ func runDaemonRotateLogs(cmd *cobra.Command, args []string) error {
 		fmt.Printf("%s No logs needed rotation\n", style.Bold.Render("✓"))
 	}
 
+	return nil
+}
+
+// runDaemonCheckpointCycle runs one checkpoint cycle, auto-committing WIP changes
+// in active polecat worktrees. This is the CLI entry point used by the hub daemon
+// when triggering checkpoints on satellite machines via SSH.
+func runDaemonCheckpointCycle(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	d, err := daemon.NewCheckpointRunner(townRoot)
+	if err != nil {
+		return fmt.Errorf("initializing checkpoint runner: %w", err)
+	}
+
+	d.RunCheckpointCycle()
 	return nil
 }
