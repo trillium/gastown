@@ -12,20 +12,25 @@ import (
 
 	"github.com/spf13/cobra"
 	"github.com/steveyegge/gastown/internal/beads"
+	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/git"
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/util"
+	"github.com/steveyegge/gastown/internal/workspace"
 )
 
 // Polecat command flags
 var (
-	polecatListJSON  bool
-	polecatListAll   bool
-	polecatForce     bool
-	polecatRemoveAll bool
+	polecatListJSON        bool
+	polecatListAll         bool
+	polecatListAllMachines bool
+	polecatForce           bool
+	polecatRemoveAll       bool
 )
 
 var polecatCmd = &cobra.Command{
@@ -326,6 +331,7 @@ func init() {
 	// List flags
 	polecatListCmd.Flags().BoolVar(&polecatListJSON, "json", false, "Output as JSON")
 	polecatListCmd.Flags().BoolVar(&polecatListAll, "all", false, "List polecats in all rigs")
+	polecatListCmd.Flags().BoolVar(&polecatListAllMachines, "all-machines", false, "Include polecats from satellite machines")
 
 	// Remove flags
 	polecatRemoveCmd.Flags().BoolVarP(&polecatForce, "force", "f", false, "Force removal, bypassing checks")
@@ -395,6 +401,7 @@ type PolecatListItem struct {
 	SessionRunning bool          `json:"session_running"`
 	Zombie         bool          `json:"zombie,omitempty"`
 	SessionName    string        `json:"session_name,omitempty"`
+	Machine        string        `json:"machine,omitempty"`
 }
 
 // effectivePolecatState returns the observable state used by polecat list output.
@@ -501,6 +508,31 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 		}
 	}
 
+	// Merge remote polecats when --all-machines is set
+	if polecatListAllMachines {
+		townRoot, err := workspace.FindFromCwdOrError()
+		if err == nil {
+			machinesPath := constants.MayorMachinesPath(townRoot)
+			machines, err := config.LoadMachinesConfig(machinesPath)
+			if err != nil {
+				fmt.Fprintf(os.Stderr, "warning: failed to load machines config: %v\n", err)
+			} else {
+				for _, rs := range listAllRemoteSessions(machines) {
+					if rs.Identity.Role != session.RolePolecat {
+						continue
+					}
+					allPolecats = append(allPolecats, PolecatListItem{
+						Rig:            rs.Identity.Rig,
+						Name:           rs.Identity.Name,
+						State:          polecat.StateWorking,
+						SessionRunning: true,
+						Machine:        rs.Machine,
+					})
+				}
+			}
+		}
+	}
+
 	// Output
 	for i := range allPolecats {
 		allPolecats[i].State = effectivePolecatState(allPolecats[i])
@@ -515,6 +547,15 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 	if len(allPolecats) == 0 {
 		fmt.Println("No polecats found.")
 		return nil
+	}
+
+	// Determine if we have any remote polecats (controls Machine column display)
+	hasRemote := false
+	for _, p := range allPolecats {
+		if p.Machine != "" {
+			hasRemote = true
+			break
+		}
 	}
 
 	fmt.Printf("%s\n\n", style.Bold.Render("Polecats"))
@@ -540,7 +581,16 @@ func runPolecatList(cmd *cobra.Command, args []string) error {
 			stateStr = style.Dim.Render(stateStr)
 		}
 
-		fmt.Printf("  %s %s/%s  %s\n", sessionStatus, p.Rig, p.Name, stateStr)
+		machineSuffix := ""
+		if hasRemote {
+			m := p.Machine
+			if m == "" {
+				m = "local"
+			}
+			machineSuffix = "  " + style.Dim.Render("["+m+"]")
+		}
+
+		fmt.Printf("  %s %s/%s  %s%s\n", sessionStatus, p.Rig, p.Name, stateStr, machineSuffix)
 		if p.Issue != "" {
 			fmt.Printf("    %s\n", style.Dim.Render(p.Issue))
 		}
