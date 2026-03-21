@@ -4,7 +4,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
-	"os/exec"
 	"sort"
 	"strings"
 	"time"
@@ -13,6 +12,7 @@ import (
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/dispatch"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/ssh"
 )
 
 // --- machines-config check ---
@@ -148,7 +148,7 @@ func (c *SatelliteSSHCheck) Run(ctx *CheckContext) *CheckResult {
 		entry := workers[name]
 		target := entry.SSHTarget()
 		start := time.Now()
-		err := sshPing(target)
+		err := ssh.Ping(target)
 		elapsed := time.Since(start)
 
 		if err != nil {
@@ -223,7 +223,7 @@ func (c *SatelliteProxyCheck) Run(ctx *CheckContext) *CheckResult {
 	}
 
 	// Check admin API on hub via SSH curl
-	out, err := sshRun(hubTarget,
+	out, err := ssh.CombinedRun(hubTarget,
 		"curl -s -o /dev/null -w '%{http_code}' --connect-timeout 3 http://127.0.0.1:9877/v1/admin/issue-cert 2>/dev/null || echo FAIL",
 		10*time.Second)
 	if err != nil {
@@ -469,42 +469,10 @@ func loadMachinesForDoctor(townRoot string) (*config.MachinesConfig, error) {
 	return &cfg, nil
 }
 
-// sshPing checks SSH connectivity with a short timeout.
-func sshPing(target string) error {
-	cmd := exec.Command("ssh",
-		"-o", "ConnectTimeout=5",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "BatchMode=yes",
-		target, "echo ok")
-	out, err := cmd.CombinedOutput()
-	if err != nil {
-		return fmt.Errorf("%v (output: %s)", err, strings.TrimSpace(string(out)))
-	}
-	return nil
-}
-
-// sshRun runs a command on a remote machine via SSH with a timeout.
-func sshRun(target, remoteCmd string, timeout time.Duration) (string, error) {
-	cmd := exec.Command("ssh",
-		"-o", "ConnectTimeout=5",
-		"-o", "StrictHostKeyChecking=accept-new",
-		"-o", "BatchMode=yes",
-		target, remoteCmd)
-
-	timer := time.AfterFunc(timeout, func() { _ = cmd.Process.Kill() })
-	out, err := cmd.CombinedOutput()
-	timer.Stop()
-
-	if err != nil {
-		return "", fmt.Errorf("%v (output: %s)", err, strings.TrimSpace(string(out)))
-	}
-	return string(out), nil
-}
-
 // countRemotePolecatsForDoctor SSHes to a machine and counts polecat tmux sessions.
 func countRemotePolecatsForDoctor(entry *config.MachineEntry) (int, error) {
 	target := entry.SSHTarget()
-	out, err := sshRun(target, "tmux list-sessions -F '#{session_name}' 2>/dev/null || true", 10*time.Second)
+	out, err := ssh.CombinedRun(target, "tmux list-sessions -F '#{session_name}' 2>/dev/null || true", 10*time.Second)
 	if err != nil {
 		return 0, err
 	}

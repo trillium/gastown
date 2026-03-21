@@ -14,6 +14,7 @@ import (
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/ssh"
 	tmuxPkg "github.com/steveyegge/gastown/internal/tmux"
 )
 
@@ -228,31 +229,7 @@ func (d *Daemon) checkpointSatellites() int {
 
 // runSSHCmd executes a command on a remote machine via SSH with a timeout.
 func runSSHCmd(sshTarget, remoteCmd string, timeout time.Duration) (string, error) {
-	args := []string{
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=10",
-		"-o", "StrictHostKeyChecking=accept-new",
-		sshTarget,
-		remoteCmd,
-	}
-	cmd := exec.Command("ssh", args...)
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			return "", fmt.Errorf("ssh %s: %w\nstderr: %s", sshTarget, err, stderr.String())
-		}
-		return stdout.String(), nil
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
-		return "", fmt.Errorf("ssh %s: timed out after %s", sshTarget, timeout)
-	}
+	return ssh.Run(sshTarget, remoteCmd, timeout)
 }
 
 // CheckpointRunner is a lightweight checkpoint executor for use outside the

@@ -1,12 +1,10 @@
 package cmd
 
 import (
-	"bytes"
 	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
-	"os/exec"
 	"path/filepath"
 	"sort"
 	"strings"
@@ -21,6 +19,7 @@ import (
 	"github.com/steveyegge/gastown/internal/polecat"
 	"github.com/steveyegge/gastown/internal/rig"
 	"github.com/steveyegge/gastown/internal/session"
+	gssh "github.com/steveyegge/gastown/internal/ssh"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
 	"github.com/steveyegge/gastown/internal/workspace"
@@ -730,38 +729,10 @@ func startRemoteSatelliteSession(
 
 // runSSH executes a command on a remote machine via SSH.
 func runSSH(sshTarget, remoteCmd string, timeout time.Duration) (string, error) {
-	return runSSHWithStdin(sshTarget, remoteCmd, nil, timeout)
+	return gssh.Run(sshTarget, remoteCmd, timeout)
 }
 
 // runSSHWithStdin executes a command on a remote machine via SSH, optionally piping stdin.
 func runSSHWithStdin(sshTarget, remoteCmd string, stdin []byte, timeout time.Duration) (string, error) {
-	args := []string{
-		"-o", "BatchMode=yes",
-		"-o", "ConnectTimeout=10",
-		"-o", "StrictHostKeyChecking=accept-new",
-		sshTarget,
-		remoteCmd,
-	}
-	cmd := exec.Command("ssh", args...)
-	if stdin != nil {
-		cmd.Stdin = bytes.NewReader(stdin)
-	}
-
-	var stdout, stderr bytes.Buffer
-	cmd.Stdout = &stdout
-	cmd.Stderr = &stderr
-
-	done := make(chan error, 1)
-	go func() { done <- cmd.Run() }()
-
-	select {
-	case err := <-done:
-		if err != nil {
-			return "", fmt.Errorf("ssh %s: %w\nstderr: %s", sshTarget, err, stderr.String())
-		}
-		return stdout.String(), nil
-	case <-time.After(timeout):
-		_ = cmd.Process.Kill()
-		return "", fmt.Errorf("ssh %s: timed out after %s", sshTarget, timeout)
-	}
+	return gssh.RunWithStdin(sshTarget, remoteCmd, stdin, timeout)
 }
