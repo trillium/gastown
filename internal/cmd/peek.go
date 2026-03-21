@@ -132,19 +132,12 @@ func peekRemote(townRoot, sessionName string, lines int) (string, error) {
 		return "", err
 	}
 
-	// Find which machine has this session.
-	for _, rs := range listAllRemoteSessions(machines) {
-		if rs.RawName != sessionName {
-			continue
-		}
-		entry := machines.Machines[rs.Machine]
-		if entry == nil {
-			continue
-		}
-		remoteCmd := fmt.Sprintf("tmux -L gt capture-pane -p -t %s -S -%d",
-			config.ShellQuote(sessionName), lines)
-		return runSSH(entry.SSHTarget(), remoteCmd, 15*time.Second)
+	machineName, err := findSessionMachine(machines, sessionName)
+	if err != nil {
+		return "", err
 	}
-
-	return "", fmt.Errorf("session %q not found on any satellite machine", sessionName)
+	entry := machines.Machines[machineName]
+	remoteCmd := fmt.Sprintf("tmux -L gt capture-pane -p -t %s -S -%d",
+		config.ShellQuote(sessionName), lines)
+	return runSSH(entry.SSHTarget(), remoteCmd, 15*time.Second)
 }

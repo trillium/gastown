@@ -918,20 +918,13 @@ func addressToAgentBeadID(address string) string {
 }
 
 // resolveSessionMachine finds which satellite machine hosts a given tmux session.
-// Returns the machine name or error if not found on any machine.
 func resolveSessionMachine(townRoot, sessionName string) (string, error) {
 	machinesPath := constants.MayorMachinesPath(townRoot)
 	machines, err := config.LoadMachinesConfig(machinesPath)
 	if err != nil {
 		return "", err
 	}
-
-	for _, rs := range listAllRemoteSessions(machines) {
-		if rs.RawName == sessionName {
-			return rs.Machine, nil
-		}
-	}
-	return "", fmt.Errorf("session %q not found on any satellite machine", sessionName)
+	return findSessionMachine(machines, sessionName)
 }
 
 // nudgeRemote delivers a nudge to a session on a remote machine via SSH.

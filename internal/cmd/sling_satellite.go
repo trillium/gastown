@@ -243,6 +243,17 @@ func runOnSatellites(machines *config.MachinesConfig, buildCmd func(gtBin string
 	return results
 }
 
+// findSessionMachine finds which satellite machine hosts a given tmux session.
+// Returns the machine name or error if not found on any machine.
+func findSessionMachine(machines *config.MachinesConfig, sessionName string) (string, error) {
+	for _, rs := range listAllRemoteSessions(machines) {
+		if rs.RawName == sessionName {
+			return rs.Machine, nil
+		}
+	}
+	return "", fmt.Errorf("session %q not found on any satellite machine", sessionName)
+}
+
 // countRemotePolecats SSHes to each worker in parallel and counts active polecat tmux sessions.
 // Returns a map of machine name → active polecat count.
 func countRemotePolecats(machines *config.MachinesConfig, workerNames []string) map[string]int {
