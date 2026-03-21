@@ -397,8 +397,8 @@ func (c *Config) HostPort() string {
 func buildDoltSQLCmd(ctx context.Context, config *Config, args ...string) *exec.Cmd {
 	sqlArgs := config.SQLArgs()
 	fullArgs := make([]string, 0, len(sqlArgs)+1+len(args))
+	fullArgs = append(fullArgs, sqlArgs...) // global flags must precede subcommand
 	fullArgs = append(fullArgs, "sql")
-	fullArgs = append(fullArgs, sqlArgs...)
 	fullArgs = append(fullArgs, args...)
 
 	cmd := exec.CommandContext(ctx, "dolt", fullArgs...)
@@ -408,7 +408,9 @@ func buildDoltSQLCmd(ctx context.Context, config *Config, args ...string) *exec.
 	// connections can trigger .doltcfg creation if CWD is uncontrolled.
 	cmd.Dir = config.DataDir
 
-	if config.IsRemote() && config.Password != "" {
+	if config.IsRemote() {
+		// Always set DOLT_CLI_PASSWORD (even empty) to prevent dolt from
+		// attempting keychain/credential-file lookup on macOS.
 		cmd.Env = append(os.Environ(), "DOLT_CLI_PASSWORD="+config.Password)
 	}
 
