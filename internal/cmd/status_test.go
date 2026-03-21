@@ -2,6 +2,7 @@ package cmd
 
 import (
 	"bytes"
+	"fmt"
 	"io"
 	"os"
 	"path/filepath"
@@ -11,6 +12,8 @@ import (
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
 	"github.com/steveyegge/gastown/internal/rig"
+	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func captureStderr(t *testing.T, fn func()) string {
@@ -549,5 +552,122 @@ func TestExtractBaseName(t *testing.T) {
 				t.Errorf("extractBaseName(%q) = %q, want %q", tt.cmdline, got, tt.want)
 			}
 		})
+	}
+}
+
+// --- discoverLiveSessions tests (gt-t54) ---
+
+func withDiscoverSeams(t *testing.T) {
+	t.Helper()
+	origList := tmuxListSessionsFn
+	origAlive := tmuxIsAgentAliveFn
+	t.Cleanup(func() {
+		tmuxListSessionsFn = origList
+		tmuxIsAgentAliveFn = origAlive
+	})
+}
+
+func setupStatusTestRegistry(t *testing.T) {
+	t.Helper()
+	orig := session.DefaultRegistry()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	session.SetDefaultRegistry(reg)
+	t.Cleanup(func() { session.SetDefaultRegistry(orig) })
+}
+
+func TestDiscoverLiveSessions_AllAlive(t *testing.T) {
+	setupStatusTestRegistry(t)
+	withDiscoverSeams(t)
+
+	tmuxListSessionsFn = func(_ *tmux.Tmux) ([]string, error) {
+		return []string{"hq-mayor", "gt-Toast", "gt-Butter"}, nil
+	}
+	tmuxIsAgentAliveFn = func(_ *tmux.Tmux, _ string) bool { return true }
+
+	result := discoverLiveSessions(nil)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 sessions, got %d: %v", len(result), result)
+	}
+	for name, alive := range result {
+		if !alive {
+			t.Errorf("session %q should be alive", name)
+		}
+	}
+}
+
+func TestDiscoverLiveSessions_MixedLiveness(t *testing.T) {
+	setupStatusTestRegistry(t)
+	withDiscoverSeams(t)
+
+	tmuxListSessionsFn = func(_ *tmux.Tmux) ([]string, error) {
+		return []string{"hq-mayor", "gt-Toast", "gt-Zombie"}, nil
+	}
+	tmuxIsAgentAliveFn = func(_ *tmux.Tmux, name string) bool {
+		return name != "gt-Zombie"
+	}
+
+	result := discoverLiveSessions(nil)
+	if len(result) != 3 {
+		t.Fatalf("expected 3 sessions, got %d", len(result))
+	}
+	if !result["hq-mayor"] {
+		t.Error("hq-mayor should be alive")
+	}
+	if !result["gt-Toast"] {
+		t.Error("gt-Toast should be alive")
+	}
+	if result["gt-Zombie"] {
+		t.Error("gt-Zombie should be dead")
+	}
+}
+
+func TestDiscoverLiveSessions_UnknownSessionsAlwaysTrue(t *testing.T) {
+	setupStatusTestRegistry(t)
+	withDiscoverSeams(t)
+
+	tmuxListSessionsFn = func(_ *tmux.Tmux) ([]string, error) {
+		return []string{"random-user-session", "my-scratch"}, nil
+	}
+	// IsAgentAlive should NOT be called for unknown sessions
+	tmuxIsAgentAliveFn = func(_ *tmux.Tmux, name string) bool {
+		t.Errorf("IsAgentAlive called for unknown session %q", name)
+		return false
+	}
+
+	result := discoverLiveSessions(nil)
+	if len(result) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(result))
+	}
+	for name, alive := range result {
+		if !alive {
+			t.Errorf("unknown session %q should default to alive=true", name)
+		}
+	}
+}
+
+func TestDiscoverLiveSessions_ListError(t *testing.T) {
+	withDiscoverSeams(t)
+
+	tmuxListSessionsFn = func(_ *tmux.Tmux) ([]string, error) {
+		return nil, fmt.Errorf("no tmux server")
+	}
+
+	result := discoverLiveSessions(nil)
+	if len(result) != 0 {
+		t.Errorf("expected empty map on list error, got %d entries", len(result))
+	}
+}
+
+func TestDiscoverLiveSessions_Empty(t *testing.T) {
+	withDiscoverSeams(t)
+
+	tmuxListSessionsFn = func(_ *tmux.Tmux) ([]string, error) {
+		return nil, nil
+	}
+
+	result := discoverLiveSessions(nil)
+	if len(result) != 0 {
+		t.Errorf("expected empty map for no sessions, got %d entries", len(result))
 	}
 }

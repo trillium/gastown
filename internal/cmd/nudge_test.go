@@ -1,12 +1,14 @@
 package cmd
 
 import (
+	"fmt"
 	"strings"
 	"testing"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/nudge"
 	"github.com/steveyegge/gastown/internal/session"
+	"github.com/steveyegge/gastown/internal/tmux"
 )
 
 func setupNudgeTestRegistry(t *testing.T) {
@@ -503,5 +505,178 @@ func TestQueueLen(t *testing.T) {
 	_, _ = nudge.Drain(tmpDir, "test-session")
 	if got := nudge.QueueLen(tmpDir, "test-session"); got != 0 {
 		t.Errorf("QueueLen after drain = %d, want 0", got)
+	}
+}
+
+// --- deliverNudgeLocalOrRemote tests (gt-ve6) ---
+
+// withNudgeSeams saves and restores all nudge test seams.
+func withNudgeSeams(t *testing.T) {
+	t.Helper()
+	origACP := hasACPSessionFn
+	origTmux := tmuxHasSessionFn
+	origResolve := resolveSessionFn
+	origRemote := nudgeRemoteFn
+	origDeliver := deliverNudgeFn
+	origLog := logNudgeFn
+	t.Cleanup(func() {
+		hasACPSessionFn = origACP
+		tmuxHasSessionFn = origTmux
+		resolveSessionFn = origResolve
+		nudgeRemoteFn = origRemote
+		deliverNudgeFn = origDeliver
+		logNudgeFn = origLog
+	})
+	// Default all seams to no-ops / false
+	hasACPSessionFn = func(_, _ string) bool { return false }
+	tmuxHasSessionFn = func(_ *tmux.Tmux, _ string) bool { return false }
+	resolveSessionFn = func(_, _ string) (string, error) { return "", fmt.Errorf("not found") }
+	nudgeRemoteFn = func(_, _, _, _ string) error { return nil }
+	deliverNudgeFn = func(_ *tmux.Tmux, _, _, _ string) error { return nil }
+	logNudgeFn = func(_, _, _ string) {}
+}
+
+func TestDeliverNudge_LocalACP(t *testing.T) {
+	withNudgeSeams(t)
+
+	delivered := false
+	hasACPSessionFn = func(_, name string) bool { return name == "hq-mayor" }
+	deliverNudgeFn = func(_ *tmux.Tmux, sessionName, _, _ string) error {
+		delivered = true
+		if sessionName != "hq-mayor" {
+			t.Errorf("session = %q, want %q", sessionName, "hq-mayor")
+		}
+		return nil
+	}
+
+	err := deliverNudgeLocalOrRemote(nil, "/town", "hq-mayor", "mayor", "gastown", "wake up", "witness")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !delivered {
+		t.Error("expected local delivery via ACP path")
+	}
+}
+
+func TestDeliverNudge_LocalTmux(t *testing.T) {
+	withNudgeSeams(t)
+
+	delivered := false
+	tmuxHasSessionFn = func(_ *tmux.Tmux, name string) bool { return name == "gt-Toast" }
+	deliverNudgeFn = func(_ *tmux.Tmux, sessionName, _, _ string) error {
+		delivered = true
+		if sessionName != "gt-Toast" {
+			t.Errorf("session = %q, want %q", sessionName, "gt-Toast")
+		}
+		return nil
+	}
+
+	err := deliverNudgeLocalOrRemote(nil, "/town", "gt-Toast", "Toast", "gastown", "hello", "mayor")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !delivered {
+		t.Error("expected local delivery via tmux path")
+	}
+}
+
+func TestDeliverNudge_Remote(t *testing.T) {
+	withNudgeSeams(t)
+
+	remoteNudged := false
+	resolveSessionFn = func(_, sessionName string) (string, error) {
+		if sessionName == "gt-Toast" {
+			return "mini2", nil
+		}
+		return "", fmt.Errorf("not found")
+	}
+	nudgeRemoteFn = func(machine, sessionName, _, _ string) error {
+		remoteNudged = true
+		if machine != "mini2" {
+			t.Errorf("machine = %q, want %q", machine, "mini2")
+		}
+		if sessionName != "gt-Toast" {
+			t.Errorf("session = %q, want %q", sessionName, "gt-Toast")
+		}
+		return nil
+	}
+
+	err := deliverNudgeLocalOrRemote(nil, "/town", "gt-Toast", "Toast", "gastown", "hello", "mayor")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !remoteNudged {
+		t.Error("expected remote nudge delivery")
+	}
+}
+
+func TestDeliverNudge_RemoteFailure(t *testing.T) {
+	withNudgeSeams(t)
+
+	resolveSessionFn = func(_, _ string) (string, error) { return "mini2", nil }
+	nudgeRemoteFn = func(_, _, _, _ string) error { return fmt.Errorf("ssh timeout") }
+
+	err := deliverNudgeLocalOrRemote(nil, "/town", "gt-Toast", "Toast", "gastown", "hello", "mayor")
+	if err == nil {
+		t.Fatal("expected error when remote nudge fails")
+	}
+	if !strings.Contains(err.Error(), "remote nudge") {
+		t.Errorf("error should mention 'remote nudge', got: %v", err)
+	}
+}
+
+func TestDeliverNudge_NotFoundAnywhere(t *testing.T) {
+	withNudgeSeams(t)
+
+	err := deliverNudgeLocalOrRemote(nil, "/town", "gt-Ghost", "Ghost", "gastown", "hello", "mayor")
+	if err == nil {
+		t.Fatal("expected error when session not found anywhere")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error should mention 'not found', got: %v", err)
+	}
+}
+
+func TestDeliverNudge_ACPTakesPrecedenceOverTmux(t *testing.T) {
+	withNudgeSeams(t)
+
+	// Both ACP and tmux say "yes" — ACP should win (checked first)
+	hasACPSessionFn = func(_, _ string) bool { return true }
+	tmuxHasSessionFn = func(_ *tmux.Tmux, _ string) bool { return true }
+
+	deliveredLocal := false
+	deliverNudgeFn = func(_ *tmux.Tmux, _, _, _ string) error {
+		deliveredLocal = true
+		return nil
+	}
+	// Remote should NOT be called
+	nudgeRemoteFn = func(_, _, _, _ string) error {
+		t.Error("remote nudge should not be called when session is local")
+		return nil
+	}
+
+	err := deliverNudgeLocalOrRemote(nil, "/town", "hq-mayor", "mayor", "gastown", "test", "witness")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if !deliveredLocal {
+		t.Error("expected local delivery")
+	}
+}
+
+func TestDeliverNudge_LocalDeliveryError(t *testing.T) {
+	withNudgeSeams(t)
+
+	tmuxHasSessionFn = func(_ *tmux.Tmux, _ string) bool { return true }
+	deliverNudgeFn = func(_ *tmux.Tmux, _, _, _ string) error {
+		return fmt.Errorf("tmux send-keys failed")
+	}
+
+	err := deliverNudgeLocalOrRemote(nil, "/town", "gt-Toast", "Toast", "gastown", "hello", "mayor")
+	if err == nil {
+		t.Fatal("expected error when local delivery fails")
+	}
+	if !strings.Contains(err.Error(), "nudging session") {
+		t.Errorf("error should wrap with 'nudging session', got: %v", err)
 	}
 }
