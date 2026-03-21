@@ -36,6 +36,7 @@ var statusFast bool
 var statusWatch bool
 var statusInterval int
 var statusVerbose bool
+var statusFleet bool
 
 var statusCmd = &cobra.Command{
 	Use:         "status",
@@ -58,6 +59,7 @@ func init() {
 	statusCmd.Flags().BoolVarP(&statusWatch, "watch", "w", false, "Watch mode: refresh status continuously")
 	statusCmd.Flags().IntVarP(&statusInterval, "interval", "n", 2, "Refresh interval in seconds")
 	statusCmd.Flags().BoolVarP(&statusVerbose, "verbose", "v", false, "Show detailed multi-line output per agent")
+	statusCmd.Flags().BoolVar(&statusFleet, "fleet", false, "Show status across all machines in the fleet")
 	rootCmd.AddCommand(statusCmd)
 }
 
@@ -455,6 +457,9 @@ func buildInfoFromConfig(rc *config.RuntimeConfig) string {
 }
 
 func runStatus(cmd *cobra.Command, args []string) error {
+	if statusFleet {
+		return runStatusFleet()
+	}
 	if statusWatch {
 		return runStatusWatch(cmd, args)
 	}
@@ -602,6 +607,156 @@ func runStatusOnce(_ *cobra.Command, _ []string) error {
 		return outputStatusJSON(status)
 	}
 	return outputStatusText(os.Stdout, status)
+}
+
+// MachineStatus holds the status result from one machine in the fleet.
+type MachineStatus struct {
+	Machine string     `json:"machine"`
+	Status  TownStatus `json:"status"`
+	Error   string     `json:"error,omitempty"`
+}
+
+func runStatusFleet() error {
+	// Gather local status first
+	localStatus, localErr := gatherStatus()
+
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return err
+	}
+
+	machinesPath := filepath.Join(townRoot, "mayor", "machines.json")
+	machines, err := config.LoadMachinesConfig(machinesPath)
+	if err != nil {
+		return fmt.Errorf("loading machines config: %w", err)
+	}
+
+	// Gather remote statuses in parallel
+	type result struct {
+		name   string
+		status *TownStatus
+		err    error
+	}
+
+	var wg sync.WaitGroup
+	results := make(chan result, len(machines.Machines))
+
+	for name, entry := range machines.Machines {
+		if !entry.Enabled {
+			continue
+		}
+		wg.Add(1)
+		go func(name string, entry *config.MachineEntry) {
+			defer wg.Done()
+			gtBin := entry.GtBinary
+			if gtBin == "" {
+				gtBin = "gt"
+			}
+			out, err := runSSH(entry.SSHTarget(), gtBin+" status --json", 15*time.Second)
+			if err != nil {
+				results <- result{name: name, err: err}
+				return
+			}
+			var ts TownStatus
+			if err := json.Unmarshal([]byte(out), &ts); err != nil {
+				results <- result{name: name, err: fmt.Errorf("parsing status JSON: %w", err)}
+				return
+			}
+			results <- result{name: name, status: &ts}
+		}(name, entry)
+	}
+
+	go func() {
+		wg.Wait()
+		close(results)
+	}()
+
+	// Collect results
+	var machineResults []MachineStatus
+
+	if statusJSON {
+		// Include local in JSON output
+		ms := MachineStatus{Machine: "local"}
+		if localErr != nil {
+			ms.Error = localErr.Error()
+		} else {
+			ms.Status = localStatus
+		}
+		machineResults = append(machineResults, ms)
+	}
+
+	remoteResults := make(map[string]result)
+	for r := range results {
+		remoteResults[r.name] = r
+		if statusJSON {
+			ms := MachineStatus{Machine: r.name}
+			if r.err != nil {
+				ms.Error = r.err.Error()
+			} else {
+				ms.Status = *r.status
+			}
+			machineResults = append(machineResults, ms)
+		}
+	}
+
+	if statusJSON {
+		enc := json.NewEncoder(os.Stdout)
+		enc.SetIndent("", "  ")
+		return enc.Encode(machineResults)
+	}
+
+	// Text output
+	fmt.Printf("%s\n\n", style.Bold.Render("Fleet Status"))
+
+	// Local
+	fmt.Printf("── %s ──\n", style.Bold.Render("local"))
+	if localErr != nil {
+		fmt.Printf("  %s %v\n", style.Error.Render("✗"), localErr)
+	} else {
+		printFleetSummary(localStatus)
+	}
+
+	// Remote machines
+	for name, entry := range machines.Machines {
+		if !entry.Enabled {
+			continue
+		}
+		fmt.Printf("\n── %s ──\n", style.Bold.Render(name))
+		r, ok := remoteResults[name]
+		if !ok || r.err != nil {
+			errMsg := "unreachable"
+			if ok {
+				errMsg = r.err.Error()
+			}
+			fmt.Printf("  %s %s\n", style.Error.Render("✗"), errMsg)
+			continue
+		}
+		printFleetSummary(*r.status)
+	}
+
+	return nil
+}
+
+func printFleetSummary(s TownStatus) {
+	// Daemon
+	if s.Daemon != nil {
+		if s.Daemon.Running {
+			fmt.Printf("  daemon: %s\n", style.Success.Render("running"))
+		} else {
+			fmt.Printf("  daemon: %s\n", style.Error.Render("stopped"))
+		}
+	}
+	// Dolt
+	if s.Dolt != nil {
+		if s.Dolt.Running {
+			fmt.Printf("  dolt: %s\n", style.Success.Render("running"))
+		} else {
+			fmt.Printf("  dolt: %s\n", style.Error.Render("stopped"))
+		}
+	}
+	// Summary counts
+	fmt.Printf("  rigs: %d  polecats: %d  crew: %d  hooks: %d\n",
+		s.Summary.RigCount, s.Summary.PolecatCount, s.Summary.CrewCount, s.Summary.ActiveHooks)
 }
 
 func gatherStatus() (TownStatus, error) {
