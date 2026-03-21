@@ -227,8 +227,9 @@ func (d *Daemon) checkpointSatellites() int {
 	return triggered
 }
 
-// runSSHCmd executes a command on a remote machine via SSH with a timeout.
-func runSSHCmd(sshTarget, remoteCmd string, timeout time.Duration) (string, error) {
+// runSSHCmd is a package-level function variable for SSH execution.
+// It is a seam for tests — swap to avoid real SSH calls in unit tests.
+var runSSHCmd = func(sshTarget, remoteCmd string, timeout time.Duration) (string, error) {
 	return ssh.Run(sshTarget, remoteCmd, timeout)
 }
 
