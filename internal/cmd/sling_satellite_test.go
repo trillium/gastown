@@ -2,12 +2,15 @@ package cmd
 
 import (
 	"encoding/json"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/config"
+	"github.com/steveyegge/gastown/internal/session"
 )
 
 // --- MachinesConfig method tests ---
@@ -506,6 +509,383 @@ func TestIssueCertResponse_Roundtrip(t *testing.T) {
 	}
 	if parsed.Cert != resp.Cert {
 		t.Errorf("Cert roundtrip failed (newlines likely corrupted)")
+	}
+}
+
+// --- SSH test seam tests (gt-778) ---
+
+// withMockSSH swaps runSSH for the duration of a test and restores it on cleanup.
+func withMockSSH(t *testing.T, fn func(target, cmd string, timeout time.Duration) (string, error)) {
+	t.Helper()
+	orig := runSSH
+	runSSH = fn
+	t.Cleanup(func() { runSSH = orig })
+}
+
+func TestRunSSH_SeamIsSwappable(t *testing.T) {
+	called := false
+	withMockSSH(t, func(target, cmd string, _ time.Duration) (string, error) {
+		called = true
+		if target != "testhost" {
+			t.Errorf("target = %q, want %q", target, "testhost")
+		}
+		return "ok", nil
+	})
+
+	out, err := runSSH("testhost", "echo hi", 5*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "ok" {
+		t.Errorf("output = %q, want %q", out, "ok")
+	}
+	if !called {
+		t.Error("mock was not called — seam is not effective")
+	}
+}
+
+func TestRunSSHWithStdin_SeamIsSwappable(t *testing.T) {
+	orig := runSSHWithStdin
+	defer func() { runSSHWithStdin = orig }()
+
+	called := false
+	runSSHWithStdin = func(target, cmd string, stdin []byte, _ time.Duration) (string, error) {
+		called = true
+		if string(stdin) != "hello" {
+			t.Errorf("stdin = %q, want %q", string(stdin), "hello")
+		}
+		return "done", nil
+	}
+
+	out, err := runSSHWithStdin("host", "cat", []byte("hello"), 5*time.Second)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if out != "done" {
+		t.Errorf("output = %q, want %q", out, "done")
+	}
+	if !called {
+		t.Error("mock was not called — seam is not effective")
+	}
+}
+
+// --- runOnSatellites tests (gt-8jq) ---
+
+func newTestMachinesConfig(machines map[string]*config.MachineEntry) *config.MachinesConfig {
+	return &config.MachinesConfig{
+		DoltHost: "10.0.0.1",
+		Machines: machines,
+	}
+}
+
+func TestRunOnSatellites_HappyPath(t *testing.T) {
+	withMockSSH(t, func(target, cmd string, _ time.Duration) (string, error) {
+		return "output-from-" + target, nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+		"m2": {Host: "10.0.0.3", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	results := runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " costs --json"
+	}, 10*time.Second)
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	byMachine := map[string]SatelliteResult{}
+	for _, r := range results {
+		byMachine[r.Machine] = r
+	}
+	for _, name := range []string{"m1", "m2"} {
+		r, ok := byMachine[name]
+		if !ok {
+			t.Errorf("missing result for machine %q", name)
+			continue
+		}
+		if r.Err != nil {
+			t.Errorf("machine %q: unexpected error: %v", name, r.Err)
+		}
+		if r.Output == "" {
+			t.Errorf("machine %q: empty output", name)
+		}
+	}
+}
+
+func TestRunOnSatellites_PartialFailure(t *testing.T) {
+	withMockSSH(t, func(target, cmd string, _ time.Duration) (string, error) {
+		if target == "u@10.0.0.3" {
+			return "", fmt.Errorf("connection refused")
+		}
+		return "ok", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+		"m2": {Host: "10.0.0.3", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	results := runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " status"
+	}, 10*time.Second)
+
+	if len(results) != 2 {
+		t.Fatalf("expected 2 results, got %d", len(results))
+	}
+
+	var succeeded, failed int
+	for _, r := range results {
+		if r.Err != nil {
+			failed++
+		} else {
+			succeeded++
+		}
+	}
+	if succeeded != 1 || failed != 1 {
+		t.Errorf("expected 1 success + 1 failure, got %d success + %d failure", succeeded, failed)
+	}
+}
+
+func TestRunOnSatellites_AllFail(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "", fmt.Errorf("ssh timeout")
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	results := runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " status"
+	}, 10*time.Second)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result, got %d", len(results))
+	}
+	if results[0].Err == nil {
+		t.Error("expected error result")
+	}
+}
+
+func TestRunOnSatellites_SkipsDisabledMachines(t *testing.T) {
+	callCount := 0
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		callCount++
+		return "ok", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"active":   {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+		"disabled": {Host: "10.0.0.3", User: "u", Roles: []string{"worker"}, Enabled: false},
+	})
+
+	results := runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " status"
+	}, 10*time.Second)
+
+	if len(results) != 1 {
+		t.Fatalf("expected 1 result (disabled skipped), got %d", len(results))
+	}
+	if callCount != 1 {
+		t.Errorf("expected 1 SSH call, got %d", callCount)
+	}
+}
+
+func TestRunOnSatellites_EmptyConfig(t *testing.T) {
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		t.Fatal("should not be called with empty config")
+		return "", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{})
+	results := runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " status"
+	}, 10*time.Second)
+
+	if len(results) != 0 {
+		t.Errorf("expected 0 results for empty config, got %d", len(results))
+	}
+}
+
+func TestRunOnSatellites_UsesGtBinaryFromConfig(t *testing.T) {
+	var capturedCmd string
+	withMockSSH(t, func(_, cmd string, _ time.Duration) (string, error) {
+		capturedCmd = cmd
+		return "ok", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true, GtBinary: "/opt/bin/gt-custom"},
+	})
+
+	runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " costs --json"
+	}, 10*time.Second)
+
+	if !strings.Contains(capturedCmd, "/opt/bin/gt-custom") {
+		t.Errorf("expected custom binary in command, got %q", capturedCmd)
+	}
+}
+
+func TestRunOnSatellites_DefaultsGtBinary(t *testing.T) {
+	var capturedCmd string
+	withMockSSH(t, func(_, cmd string, _ time.Duration) (string, error) {
+		capturedCmd = cmd
+		return "ok", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	runOnSatellites(machines, func(gtBin string) string {
+		return gtBin + " costs --json"
+	}, 10*time.Second)
+
+	if !strings.HasPrefix(capturedCmd, "gt ") {
+		t.Errorf("expected default 'gt' binary, got %q", capturedCmd)
+	}
+}
+
+// --- findSessionMachine / listAllRemoteSessions tests (gt-rnc) ---
+
+// withTestRegistry sets up a prefix registry so ParseSessionName can parse
+// "gt-gastown-p-<name>" style session names in tests.
+func withTestRegistry(t *testing.T) {
+	t.Helper()
+	orig := session.DefaultRegistry()
+	reg := session.NewPrefixRegistry()
+	reg.Register("gt", "gastown")
+	session.SetDefaultRegistry(reg)
+	t.Cleanup(func() { session.SetDefaultRegistry(orig) })
+}
+
+func TestFindSessionMachine_Found(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(target, _ string, _ time.Duration) (string, error) {
+		if target == "u@10.0.0.2" {
+			return "gt-gastown-p-Toast\ngt-gastown-p-Butter\n", nil
+		}
+		return "gt-gastown-p-Jam\n", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+		"m2": {Host: "10.0.0.3", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	machine, err := findSessionMachine(machines, "gt-gastown-p-Toast")
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if machine != "m1" {
+		t.Errorf("machine = %q, want %q", machine, "m1")
+	}
+}
+
+func TestFindSessionMachine_NotFound(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "gt-gastown-p-Existing\n", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	_, err := findSessionMachine(machines, "gt-gastown-p-Missing")
+	if err == nil {
+		t.Error("expected error for missing session")
+	}
+	if !strings.Contains(err.Error(), "not found") {
+		t.Errorf("error should mention 'not found', got: %v", err)
+	}
+}
+
+func TestFindSessionMachine_SSHFailureSkipsMachine(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(target, _ string, _ time.Duration) (string, error) {
+		if target == "u@10.0.0.2" {
+			return "", fmt.Errorf("connection refused")
+		}
+		return "gt-gastown-p-Toast\n", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+		"m2": {Host: "10.0.0.3", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	machine, err := findSessionMachine(machines, "gt-gastown-p-Toast")
+	if err != nil {
+		t.Fatalf("should find session on m2 even when m1 fails: %v", err)
+	}
+	if machine != "m2" {
+		t.Errorf("machine = %q, want %q", machine, "m2")
+	}
+}
+
+func TestListAllRemoteSessions_ParsesMultipleSessions(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "gt-gastown-p-Toast\ngt-gastown-p-Butter\n", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	sessions := listAllRemoteSessions(machines)
+	if len(sessions) != 2 {
+		t.Fatalf("expected 2 sessions, got %d", len(sessions))
+	}
+	names := map[string]bool{}
+	for _, s := range sessions {
+		names[s.RawName] = true
+		if s.Machine != "m1" {
+			t.Errorf("session %q machine = %q, want %q", s.RawName, s.Machine, "m1")
+		}
+	}
+	if !names["gt-gastown-p-Toast"] || !names["gt-gastown-p-Butter"] {
+		t.Errorf("unexpected session names: %v", names)
+	}
+}
+
+func TestListAllRemoteSessions_SkipsUnparsableSessions(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "gt-gastown-p-Toast\nnot-a-valid-session\n", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	sessions := listAllRemoteSessions(machines)
+	if len(sessions) != 1 {
+		t.Fatalf("expected 1 parsable session, got %d", len(sessions))
+	}
+	if sessions[0].RawName != "gt-gastown-p-Toast" {
+		t.Errorf("session name = %q, want %q", sessions[0].RawName, "gt-gastown-p-Toast")
+	}
+}
+
+func TestListAllRemoteSessions_EmptyOutput(t *testing.T) {
+	withTestRegistry(t)
+	withMockSSH(t, func(_, _ string, _ time.Duration) (string, error) {
+		return "", nil
+	})
+
+	machines := newTestMachinesConfig(map[string]*config.MachineEntry{
+		"m1": {Host: "10.0.0.2", User: "u", Roles: []string{"worker"}, Enabled: true},
+	})
+
+	sessions := listAllRemoteSessions(machines)
+	if len(sessions) != 0 {
+		t.Errorf("expected 0 sessions for empty output, got %d", len(sessions))
 	}
 }
 
