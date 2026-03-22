@@ -23,6 +23,8 @@ DOLT_HOST="${DOLT_HOST:-${GT_DOLT_HOST:-127.0.0.1}}"
 DOLT_PORT="${DOLT_PORT:-${GT_DOLT_PORT:-3307}}"
 DOLT_USER="${DOLT_USER:-root}"
 COMMIT_THRESHOLD="${COMMIT_THRESHOLD:-2000}"
+# Timeout for remote fetch operations (DOLT_FETCH can hang if remote is unreachable).
+FETCH_TIMEOUT="${FETCH_TIMEOUT:-90}"
 # Default: auto-discover production databases via SHOW DATABASES.
 # Override with --databases db1,db2,... for an explicit list.
 DEFAULT_DBS="auto"
@@ -272,12 +274,16 @@ for entry in "${CANDIDATES[@]}"; do
   if [[ -n "$REMOTE_NAME" ]]; then
     HAS_REMOTE=true
     log "  Remote detected ('$REMOTE_NAME'). Fetching to check for divergence..."
-    if ! dolt_exec "$DB" "CALL DOLT_FETCH('$REMOTE_NAME')"; then
+    # Use timeout to prevent indefinite hang if remote (e.g. mini3) is unreachable.
+    # timeout can't wrap shell functions, so inline the dolt command directly.
+    if ! timeout "$FETCH_TIMEOUT" dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --no-tls \
+        -u "$DOLT_USER" -p "" --use-db "$DB" \
+        sql -q "CALL DOLT_FETCH('$REMOTE_NAME')" --result-format csv >/dev/null 2>>"$LOGFILE"; then
       # Fetch timeout/failure is a warning, not a blocker. For local-source-of-truth
       # databases (hq/bd/gt), the local data IS the authority — we compact and
       # force-push. Aborting on fetch failure causes the escalation feedback loop:
       # timeout → abort → escalate → more commits → slower fetch → repeat.
-      log "  WARNING: Fetch from remote failed for $DB — proceeding with compaction (local is source of truth)"
+      log "  WARNING: Fetch from remote failed or timed out (${FETCH_TIMEOUT}s) for $DB — proceeding with compaction (local is source of truth)"
     fi
     # Verify local HEAD is at or ahead of remote HEAD.
     # If remote has commits we don't have, compaction would lose them.
