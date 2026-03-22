@@ -289,9 +289,15 @@ for entry in "${CANDIDATES[@]}"; do
     # If remote has commits we don't have, compaction would lose them.
     LOCAL_HEAD=$(dolt_query "$DB" "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1" 2>/dev/null | head -1)
     REMOTE_HEAD=$(dolt_query "$DB" "SELECT commit_hash FROM dolt_remote_branches WHERE name = '${REMOTE_NAME}/main'" 2>/dev/null | head -1)
-    # Validate hashes before using in SQL
-    [[ -n "$LOCAL_HEAD" ]] && ! validate_hash "$LOCAL_HEAD" "local HEAD" && LOCAL_HEAD=""
-    [[ -n "$REMOTE_HEAD" ]] && ! validate_hash "$REMOTE_HEAD" "remote HEAD" && REMOTE_HEAD=""
+    # Validate hashes before using in SQL.
+    # Note: must use if-form, not "&&" chains — with set -e, a successful validate_hash
+    # causes "! validate_hash" to return 1, which exits the script via short-circuit.
+    if [[ -n "$LOCAL_HEAD" ]] && ! validate_hash "$LOCAL_HEAD" "local HEAD"; then
+      LOCAL_HEAD=""
+    fi
+    if [[ -n "$REMOTE_HEAD" ]] && ! validate_hash "$REMOTE_HEAD" "remote HEAD"; then
+      REMOTE_HEAD=""
+    fi
     if [[ -n "$REMOTE_HEAD" && -n "$LOCAL_HEAD" && "$REMOTE_HEAD" != "$LOCAL_HEAD" ]]; then
       # Check if remote HEAD is an ancestor of local HEAD (local is ahead — safe)
       IS_ANCESTOR=$(dolt_query "$DB" "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = '$REMOTE_HEAD'" 2>/dev/null | head -1)
