@@ -101,14 +101,17 @@ dolt_query() {
     args+=(--use-db "$db")
   fi
   args+=(sql -q "$query" --result-format csv)
-  "${args[@]}" 2>>"$LOGFILE" | tail -n +2 | tr -d '\r'
+  # Always set DOLT_CLI_PASSWORD (even empty) to prevent macOS keychain lookup
+  # which fails with "operation not supported by device" on remote connections.
+  DOLT_CLI_PASSWORD="" "${args[@]}" 2>>"$LOGFILE" | tail -n +2 | tr -d '\r'
 }
 
 # Run a SQL statement (no result expected) against a specific database.
 dolt_exec() {
   local db="$1"
   local query="$2"
-  dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --no-tls -u "$DOLT_USER" -p "" --use-db "$db" \
+  # Always set DOLT_CLI_PASSWORD (even empty) to prevent macOS keychain lookup.
+  DOLT_CLI_PASSWORD="" dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --no-tls -u "$DOLT_USER" -p "" --use-db "$db" \
     sql -q "$query" --result-format csv >/dev/null 2>>"$LOGFILE"
 }
 
