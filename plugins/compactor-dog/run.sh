@@ -291,7 +291,7 @@ for entry in "${CANDIDATES[@]}"; do
     # Verify local HEAD is at or ahead of remote HEAD.
     # If remote has commits we don't have, compaction would lose them.
     LOCAL_HEAD=$(dolt_query "$DB" "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1" 2>/dev/null | head -1)
-    REMOTE_HEAD=$(dolt_query "$DB" "SELECT commit_hash FROM dolt_remote_branches WHERE name = '${REMOTE_NAME}/main'" 2>/dev/null | head -1)
+    REMOTE_HEAD=$(dolt_query "$DB" "SELECT hash FROM dolt_remote_branches WHERE name = '${REMOTE_NAME}/main'" 2>/dev/null | head -1)
     # Validate hashes before using in SQL.
     # Note: must use if-form, not "&&" chains — with set -e, a successful validate_hash
     # causes "! validate_hash" to return 1, which exits the script via short-circuit.
