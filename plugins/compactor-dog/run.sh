@@ -260,61 +260,10 @@ for entry in "${CANDIDATES[@]}"; do
 
   log "  Pre-flight: $TABLE_COUNT tables recorded"
 
-  # Step 3a.5: Fetch from remote before compaction to check for divergence.
-  # Without this, flatten rewrites the commit graph and DoltHub push can never
-  # fast-forward again (see gt-mkd1).
-  # NOTE: We use DOLT_FETCH instead of DOLT_PULL because a live Dolt server
-  # always has uncommitted working set changes, making DOLT_PULL fail with
-  # "cannot merge with uncommitted changes".
+  # NOTE: Remote divergence checks removed. Compaction is LOCAL only.
+  # Remotes are not checked or fetched during compaction. Post-compaction
+  # push is also skipped. If remote sync is needed, do it separately.
   HAS_REMOTE=false
-  REMOTE_NAME=$(dolt_query "$DB" "SELECT name FROM dolt_remotes LIMIT 1" 2>/dev/null | head -1)
-  if [[ -n "$REMOTE_NAME" ]]; then
-    if ! validate_name "$REMOTE_NAME" "remote"; then
-      log "  WARNING: Skipping remote with unsafe name: '$REMOTE_NAME'"
-      REMOTE_NAME=""
-    fi
-  fi
-  if [[ -n "$REMOTE_NAME" ]]; then
-    HAS_REMOTE=true
-    log "  Remote detected ('$REMOTE_NAME'). Fetching to check for divergence..."
-    # Use timeout to prevent indefinite hang if remote (e.g. mini3) is unreachable.
-    # timeout can't wrap shell functions, so inline the dolt command directly.
-    if ! timeout "$FETCH_TIMEOUT" dolt --host "$DOLT_HOST" --port "$DOLT_PORT" --no-tls \
-        -u "$DOLT_USER" -p "" --use-db "$DB" \
-        sql -q "CALL DOLT_FETCH('$REMOTE_NAME')" --result-format csv >/dev/null 2>>"$LOGFILE"; then
-      # Fetch timeout/failure is a warning, not a blocker. For local-source-of-truth
-      # databases (hq/bd/gt), the local data IS the authority — we compact and
-      # force-push. Aborting on fetch failure causes the escalation feedback loop:
-      # timeout → abort → escalate → more commits → slower fetch → repeat.
-      log "  WARNING: Fetch from remote failed or timed out (${FETCH_TIMEOUT}s) for $DB — proceeding with compaction (local is source of truth)"
-    fi
-    # Verify local HEAD is at or ahead of remote HEAD.
-    # If remote has commits we don't have, compaction would lose them.
-    LOCAL_HEAD=$(dolt_query "$DB" "SELECT commit_hash FROM dolt_log ORDER BY date DESC LIMIT 1" 2>/dev/null | head -1)
-    REMOTE_HEAD=$(dolt_query "$DB" "SELECT hash FROM dolt_remote_branches WHERE name = '${REMOTE_NAME}/main'" 2>/dev/null | head -1)
-    # Validate hashes before using in SQL.
-    # Note: must use if-form, not "&&" chains — with set -e, a successful validate_hash
-    # causes "! validate_hash" to return 1, which exits the script via short-circuit.
-    if [[ -n "$LOCAL_HEAD" ]] && ! validate_hash "$LOCAL_HEAD" "local HEAD"; then
-      LOCAL_HEAD=""
-    fi
-    if [[ -n "$REMOTE_HEAD" ]] && ! validate_hash "$REMOTE_HEAD" "remote HEAD"; then
-      REMOTE_HEAD=""
-    fi
-    if [[ -n "$REMOTE_HEAD" && -n "$LOCAL_HEAD" && "$REMOTE_HEAD" != "$LOCAL_HEAD" ]]; then
-      # Check if remote HEAD is an ancestor of local HEAD (local is ahead — safe)
-      IS_ANCESTOR=$(dolt_query "$DB" "SELECT COUNT(*) FROM dolt_log WHERE commit_hash = '$REMOTE_HEAD'" 2>/dev/null | head -1)
-      if [[ "$IS_ANCESTOR" == "0" ]]; then
-        log "  ERROR: Remote has commits not in local history — skipping compaction to avoid data loss"
-        log "  Local HEAD:  ${LOCAL_HEAD:0:12}"
-        log "  Remote HEAD: ${REMOTE_HEAD:0:12}"
-        ERRORS=$((ERRORS + 1))
-        ERROR_DETAILS="${ERROR_DETAILS}${DB}: remote ahead of local (skipped to avoid data loss)\n"
-        continue
-      fi
-    fi
-    log "  Remote fetch complete. Local is at or ahead of remote."
-  fi
 
   # Step 3b: Find root (earliest) commit hash.
   ROOT_HASH=$(dolt_query "$DB" "SELECT commit_hash FROM dolt_log ORDER BY date ASC LIMIT 1" 2>/dev/null | head -1)
@@ -416,22 +365,6 @@ for entry in "${CANDIDATES[@]}"; do
     log "  GC complete."
   else
     log "  WARNING: dolt_gc failed for $DB (non-fatal)"
-  fi
-
-  # Step 5b: Push compacted history to remote to maintain sync.
-  # This MUST be a force-push because flatten rewrites the commit graph.
-  # Safe here because: (1) we pulled first, (2) integrity is verified.
-  # Use --set-upstream because flatten loses branch tracking metadata.
-  if $HAS_REMOTE; then
-    log "  Pushing compacted history to remote ('$REMOTE_NAME')..."
-    if ! dolt_exec "$DB" "CALL DOLT_PUSH('--force', '--set-upstream', '$REMOTE_NAME', 'main')"; then
-      log "  WARNING: Force-push to remote failed for $DB"
-      log "  Remote will be out of sync — manual 'dolt push --force' may be needed"
-      ERROR_DETAILS="${ERROR_DETAILS}${DB}: force-push failed (local compacted, remote diverged)\n"
-      ERRORS=$((ERRORS + 1))
-    else
-      log "  Remote push complete."
-    fi
   fi
 
   COMPACTED=$((COMPACTED + 1))
