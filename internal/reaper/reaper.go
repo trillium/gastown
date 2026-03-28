@@ -202,17 +202,34 @@ func parentExcludeJoin(dbName string) (joinClause, whereCondition string) {
 // operations (wisps and issues). Returns false (no error) when tables are missing
 // — callers use this to skip databases that have incomplete beads schema (e.g.
 // partially initialized databases on the central Dolt server).
+//
+// Uses SHOW TABLES instead of information_schema.tables because Dolt's
+// information_schema queries with DATABASE() can fail with "no root value
+// found in session" on some server versions.
 func HasReaperSchema(db *sql.DB) (bool, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	var count int
-	err := db.QueryRowContext(ctx,
-		"SELECT COUNT(*) FROM information_schema.tables WHERE table_name IN ('wisps', 'issues') AND table_schema = DATABASE()").Scan(&count)
+	rows, err := db.QueryContext(ctx, "SHOW TABLES")
 	if err != nil {
 		return false, fmt.Errorf("check reaper schema: %w", err)
 	}
-	return count >= 2, nil
+	defer rows.Close()
+
+	var hasWisps, hasIssues bool
+	for rows.Next() {
+		var name string
+		if err := rows.Scan(&name); err != nil {
+			continue
+		}
+		switch name {
+		case "wisps":
+			hasWisps = true
+		case "issues":
+			hasIssues = true
+		}
+	}
+	return hasWisps && hasIssues, nil
 }
 
 // Scan counts reaper candidates in a database without modifying anything.
