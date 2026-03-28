@@ -25,6 +25,7 @@ This is infrastructure cleanup work:
 | alert_threshold | config | Open wisp count that triggers escalation (default 500) |
 | dry_run | config | If "true", report without acting |
 | databases | config | Comma-separated DB list (default: auto-discover) |
+| dolt_host | config | Dolt server host (default: $GT_DOLT_HOST or 127.0.0.1) |
 | dolt_port | config | Dolt server port (default 3307) |
 
 ## Safety
@@ -61,13 +62,13 @@ Discover databases and count candidates for each operation.
 
 **1. List databases to scan:**
 ```bash
-gt reaper databases --port={{dolt_port}} --json
+gt reaper databases --host={{dolt_host}} --port={{dolt_port}} --json
 ```
 Or use configured database list from {{databases}} variable.
 
 **2. Scan each database:**
 ```bash
-gt reaper scan --db=<name> --port={{dolt_port}} \\
+gt reaper scan --db=<name> --host={{dolt_host}} --port={{dolt_port}} \\
   --max-age={{max_age}} --purge-age={{purge_age}} \\
   --mail-age={{mail_delete_age}} --stale-age={{stale_issue_age}} \\
   --json
@@ -94,7 +95,7 @@ Close wisps past max_age whose parent molecule is closed or missing.
 
 **1. For each database with reap candidates:**
 ```bash
-gt reaper reap --db=<name> --port={{dolt_port}} \\
+gt reaper reap --db=<name> --host={{dolt_host}} --port={{dolt_port}} \\
   --max-age={{max_age}} {{#if dry_run}}--dry-run{{/if}} --json
 ```
 
@@ -120,7 +121,7 @@ Delete closed wisps past purge_age and closed mail past mail_delete_age.
 
 **1. For each database with purge candidates:**
 ```bash
-gt reaper purge --db=<name> --port={{dolt_port}} \\
+gt reaper purge --db=<name> --host={{dolt_host}} --port={{dolt_port}} \\
   --purge-age={{purge_age}} --mail-age={{mail_delete_age}} \\
   {{#if dry_run}}--dry-run{{/if}} --json
 ```
@@ -144,7 +145,7 @@ Close issues that have been open with no status change past stale_issue_age.
 
 **1. For each database with stale candidates:**
 ```bash
-gt reaper auto-close --db=<name> --port={{dolt_port}} \\
+gt reaper auto-close --db=<name> --host={{dolt_host}} --port={{dolt_port}} \\
   --stale-age={{stale_issue_age}} \\
   {{#if dry_run}}--dry-run{{/if}} --json
 ```
@@ -211,6 +212,10 @@ default = ""
 [vars.databases]
 description = "Comma-separated database names (empty = auto-discover)"
 default = ""
+
+[vars.dolt_host]
+description = "Dolt server host (env: GT_DOLT_HOST)"
+default = "100.111.197.110"
 
 [vars.dolt_port]
 description = "Dolt server port"
