@@ -951,9 +951,11 @@ exit 0
 	}
 }
 
-// TestCreateAutoConvoy_DepFailIsNonFatal verifies that when the dep add
-// fails, the convoy is still returned (dep failure is non-fatal since
-// cross-rig beads can't satisfy bd dep add validation after beads v0.62).
+// TestCreateAutoConvoy_DepFailIsNonFatal verifies that when the dep add fails
+// (e.g., cross-rig bead), createAutoConvoy succeeds with a warning rather than
+// returning an error. Tracking failure is non-fatal since commit 103b6aaa because
+// beads v0.62 removed cross-rig routing from bd dep add. The convoy still works
+// without the tracking dep — witness and daemon provide backup tracking.
 func TestCreateAutoConvoy_DepFailIsNonFatal(t *testing.T) {
 	if runtime.GOOS == "windows" {
 		t.Skip("skipping on windows")
@@ -985,23 +987,23 @@ exit 0
 
 	convoyID, err := createAutoConvoy("gt-aaa", "My task", false, "", "")
 	if err != nil {
-		t.Fatalf("expected dep failure to be non-fatal, got error: %v", err)
+		t.Fatalf("expected no error (dep fail is non-fatal), got: %v", err)
 	}
 	if convoyID == "" {
-		t.Fatal("expected convoy ID to be returned even when dep add fails")
+		t.Fatal("expected non-empty convoy ID")
 	}
 
-	// Verify dep was attempted but close was NOT called (no orphan cleanup)
+	// Verify create was called but close was NOT called (convoy is not orphaned)
 	logBytes, err := os.ReadFile(logPath)
 	if err != nil {
 		t.Fatalf("read log: %v", err)
 	}
 	logContent := string(logBytes)
-	if !strings.Contains(logContent, "CMD:dep") {
-		t.Errorf("expected dep add to be attempted:\n%s", logContent)
+	if !strings.Contains(logContent, "CMD:create") {
+		t.Errorf("expected create command in log:\n%s", logContent)
 	}
 	if strings.Contains(logContent, "CMD:close") {
-		t.Errorf("close should NOT be called — dep failure is non-fatal:\n%s", logContent)
+		t.Errorf("close should NOT be called (dep fail is non-fatal):\n%s", logContent)
 	}
 }
 

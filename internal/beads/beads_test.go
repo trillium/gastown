@@ -127,6 +127,13 @@ func TestBdSupportsAllowStale_ReprobesWhenBinaryPathChanges(t *testing.T) {
 	}
 }
 
+// writeAllowStaleBDStub creates a mock bd binary in dir.
+//
+// The detection function (BdSupportsAllowStaleWithEnv) ignores the exit code
+// and checks output for "unknown flag" (matching real bd v0.60+ behavior where
+// unknown flags exit 0 but print an error to stderr). The stubs must match:
+//   - Supporting: exit 0, no output
+//   - Non-supporting: exit 0, print "unknown flag" to stderr
 func writeAllowStaleBDStub(t *testing.T, dir string, supportsAllowStale bool) {
 	t.Helper()
 
@@ -137,11 +144,17 @@ func writeAllowStaleBDStub(t *testing.T, dir string, supportsAllowStale bool) {
 		scriptPath = filepath.Join(dir, "bd.bat")
 		if supportsAllowStale {
 			script = `@echo off
+setlocal enableextensions
+if "%1"=="--allow-stale" exit /b 0
 exit /b 0
 `
 		} else {
 			script = `@echo off
-echo unknown flag --allow-stale 1>&2
+setlocal enableextensions
+if "%1"=="--allow-stale" (
+  echo Error: unknown flag: --allow-stale 1>&2
+  exit /b 0
+)
 exit /b 0
 `
 		}
@@ -153,7 +166,9 @@ exit 0
 `
 		} else {
 			script = `#!/bin/sh
-echo "unknown flag --allow-stale" >&2
+if [ "$1" = "--allow-stale" ]; then
+  echo "Error: unknown flag: --allow-stale" >&2
+fi
 exit 0
 `
 		}
