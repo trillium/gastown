@@ -1,8 +1,23 @@
 # Gas Town Hooks Management
 
-Centralized Claude Code hook management for Gas Town workspaces.
+Centralized hook management for Gas Town workspaces.
 
 ## Overview
+
+Gas Town manages context injection for all supported agents. The mechanism varies by agent:
+
+| Agent | Hook mechanism | Managed file |
+|-------|---------------|-------------|
+| Claude Code, Gemini | `settings.json` lifecycle hooks | `<role>/.claude/settings.json` |
+| OpenCode | JS plugin | `workDir/.opencode/gastown.js` |
+| GitHub Copilot | JSON lifecycle hooks | `workDir/.github/hooks/gastown.json` |
+| Codex, others | Startup nudge fallback | *(no file — nudge only)* |
+
+> **GitHub Copilot note**: Copilot CLI supports full executable lifecycle hooks
+> (`sessionStart`, `userPromptSubmitted`, `preToolUse`, `sessionEnd`) via
+> `.github/hooks/gastown.json`. This is the same lifecycle coverage as Claude Code,
+> delivered in Copilot's JSON format rather than Claude's `settings.json` format.
+> The `gt hooks` commands below apply to Claude Code (and Gemini) only.
 
 Gas Town manages `.claude/settings.json` files in gastown-managed parent directories
 and passes them to Claude Code via the `--settings` flag. This keeps customer repos
@@ -139,7 +154,7 @@ The registry (`~/gt/hooks/registry.toml`) defines 7 hooks, 5 enabled by default:
 | mail-check | UserPromptSubmit | Yes | all |
 | costs-record | Stop | Yes | crew, polecat, witness, refinery |
 | clone-guard | PreToolUse | No | crew, polecat |
-| dangerous-command-guard | PreToolUse | No | crew, polecat |
+| dangerous-command-guard | PreToolUse | Yes | crew, polecat |
 
 Additional hooks exist in settings.json files but are not yet in the registry:
 

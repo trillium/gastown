@@ -9,6 +9,7 @@ import (
 
 	"github.com/steveyegge/gastown/internal/constants"
 	"github.com/steveyegge/gastown/internal/reaper"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
@@ -18,11 +19,11 @@ const (
 	// Wisps older than this are reaped (closed). Configurable via formula var max_age.
 	defaultWispMaxAge = 24 * time.Hour
 	// Closed wisps older than this are permanently deleted. Formula var: purge_age.
-	defaultWispDeleteAge = 3 * 24 * time.Hour
+	defaultWispDeleteAge = 7 * 24 * time.Hour
 	// Alert threshold: if open wisp count exceeds this, the Dog should escalate.
 	wispAlertThreshold = 500
 	// Closed mail older than this is permanently deleted. Formula var: mail_delete_age.
-	defaultMailDeleteAge = 3 * 24 * time.Hour
+	defaultMailDeleteAge = 7 * 24 * time.Hour
 	// Issues stale longer than this are auto-closed. Formula var: stale_issue_age.
 	defaultStaleIssueAge = 7 * 24 * time.Hour
 )
@@ -78,7 +79,7 @@ func wispDeleteAge(config *DaemonPatrolConfig) time.Duration {
 // The Dog reads the formula steps and calls `gt reaper` CLI helpers.
 // Falls back to inline execution if Dog dispatch fails.
 func (d *Daemon) reapWisps() {
-	if !IsPatrolEnabled(d.patrolConfig, "wisp_reaper") {
+	if !d.isPatrolActive("wisp_reaper") {
 		return
 	}
 
@@ -130,6 +131,7 @@ func (d *Daemon) dispatchReaperDog(vars map[string]string) error {
 
 	cmd := exec.Command("gt", args...)
 	cmd.Dir = d.config.TownRoot
+	util.SetDetachedProcessGroup(cmd)
 	if err := cmd.Run(); err != nil {
 		return fmt.Errorf("gt sling: %w", err)
 	}
@@ -253,6 +255,33 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		}
 	}
 
+	// Step 3c: Close plugin dispatch mails (daemon→dog instruction beads that are never closed)
+	pluginDispatchAge := 1 * time.Hour
+	var totalDispatchClosed int
+	for _, dbName := range databases {
+		if err := reaper.ValidateDBName(dbName); err != nil {
+			continue
+		}
+		db, err := reaper.OpenDB("127.0.0.1", port, dbName, 10*time.Second, 10*time.Second)
+		if err != nil {
+			continue
+		}
+		if ok, _ := reaper.HasReaperSchema(db); !ok {
+			db.Close()
+			continue
+		}
+		result, err := reaper.ClosePluginDispatches(db, dbName, pluginDispatchAge, dryRun)
+		db.Close()
+		if err != nil {
+			d.logger.Printf("wisp_reaper: %s: plugin dispatch close error: %v", dbName, err)
+			continue
+		}
+		totalDispatchClosed += result.Closed
+		if result.Closed > 0 {
+			d.logger.Printf("wisp_reaper: %s: closed %d plugin dispatches", dbName, result.Closed)
+		}
+	}
+
 	// Step 4: Auto-close
 	autoCloseErrors := 0
 	for _, dbName := range databases {
@@ -290,8 +319,8 @@ func (d *Daemon) reapWispsInline(config *WispReaperConfig, maxAge, deleteAge tim
 		d.logger.Printf("wisp_reaper: WARNING: %d open wisps exceed threshold %d — investigate wisp lifecycle",
 			totalOpen, wispAlertThreshold)
 	}
-	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d auto_closed=%d open=%d databases=%d dryRun=%v",
-		totalReaped, totalPurged, totalMailPurged, totalPluginClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
+	d.logger.Printf("wisp_reaper: cycle complete — reaped=%d purged=%d mail_purged=%d plugin_closed=%d dispatch_closed=%d auto_closed=%d open=%d databases=%d dryRun=%v",
+		totalReaped, totalPurged, totalMailPurged, totalPluginClosed, totalDispatchClosed, totalAutoClosed, totalOpen, len(databases), dryRun)
 	mol.closeStep("report")
 }
 

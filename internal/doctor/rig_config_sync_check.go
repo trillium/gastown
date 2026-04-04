@@ -7,6 +7,7 @@ import (
 	"os/exec"
 	"path/filepath"
 	"strings"
+	"time"
 
 	"github.com/steveyegge/gastown/internal/beads"
 	"github.com/steveyegge/gastown/internal/config"
@@ -168,14 +169,15 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 
 		// Check if Dolt database exists (only for server mode)
 		if metadata.DoltMode == "server" {
-			// Database name should match the prefix
-			expectedDBName := configPrefix
-			if expectedDBName == "" {
-				expectedDBName = metadata.DoltDatabase // fallback to what's in metadata
-			}
+			// Database name should match the rig directory name (rigName), not the beads
+			// prefix. This is the convention established by doltserver.EnsureMetadata:
+			// the Dolt database identifier is the rig's directory name so that rigs
+			// with short prefixes (e.g. "ts" for trading_scripts) don't collide and
+			// bd can always locate the right database without extra config.
+			expectedDBName := rigName
 
 			if expectedDBName != "" {
-				// Check if database name matches prefix
+				// Check if database name matches the rig directory name
 				if metadata.DoltDatabase != expectedDBName {
 					c.dbNameMismatches = append(c.dbNameMismatches, dbMismatch{
 						rigName:    rigName,
@@ -184,7 +186,7 @@ func (c *RigConfigSyncCheck) Run(ctx *CheckContext) *CheckResult {
 						expectedDB: expectedDBName,
 					})
 					details = append(details, fmt.Sprintf(
-						"Rig %s database name mismatch: metadata has '%s', should be '%s' (prefix)",
+						"Rig %s database name mismatch: metadata has '%s', should be '%s' (rig name)",
 						rigName, metadata.DoltDatabase, expectedDBName))
 				}
 
@@ -343,7 +345,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
-	// Fix database name mismatches - rename database to match prefix
+	// Fix database name mismatches - rename database to match rig directory name
 	renamedDBs := false
 	for _, mismatch := range c.dbNameMismatches {
 		rigPath := filepath.Join(ctx.TownRoot, mismatch.rigName)
@@ -360,7 +362,7 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 			return fmt.Errorf("could not parse metadata.json for %s: %w", mismatch.rigName, err)
 		}
 
-		// Update database name to match prefix
+		// Update database name to match rig directory name
 		metadata["dolt_database"] = mismatch.expectedDB
 
 		// Write updated metadata
@@ -393,16 +395,27 @@ func (c *RigConfigSyncCheck) Fix(ctx *CheckContext) error {
 		}
 	}
 
-	// If we renamed databases, restart the Dolt server to pick up the changes
+	// If we renamed databases, restart the Dolt server to pick up the changes.
+	// Guard: skip restart if the server has been running less than 60s — restarting
+	// during startup churn is a known crash trigger (gt-9bxzs: Dolt NomsBlockStore
+	// panic when SIGTERM arrives mid-write). The server will pick up renamed databases
+	// on its next natural restart or on the next doctor --fix run once stable.
 	if renamedDBs {
 		if running, pid, _ := doltserver.IsRunning(ctx.TownRoot); running && pid > 0 {
-			// Stop the server
-			if err := doltserver.Stop(ctx.TownRoot); err != nil {
-				return fmt.Errorf("could not stop Dolt server for restart: %w", err)
-			}
-			// Start the server again
-			if err := doltserver.Start(ctx.TownRoot); err != nil {
-				return fmt.Errorf("could not restart Dolt server: %w", err)
+			const minStableAge = 60 * time.Second
+			state, _ := doltserver.LoadState(ctx.TownRoot)
+			if state != nil && !state.StartedAt.IsZero() && time.Since(state.StartedAt) < minStableAge {
+				// Server started less than 60s ago — skip restart to avoid crash
+				// during Dolt startup churn. Databases will be picked up on next restart.
+			} else {
+				// Stop the server
+				if err := doltserver.Stop(ctx.TownRoot); err != nil {
+					return fmt.Errorf("could not stop Dolt server for restart: %w", err)
+				}
+				// Start the server again
+				if err := doltserver.Start(ctx.TownRoot); err != nil {
+					return fmt.Errorf("could not restart Dolt server: %w", err)
+				}
 			}
 		}
 	}

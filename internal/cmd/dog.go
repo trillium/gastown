@@ -1,7 +1,6 @@
 package cmd
 
 import (
-	"context"
 	"encoding/json"
 	"fmt"
 	"os"
@@ -18,7 +17,6 @@ import (
 	"github.com/steveyegge/gastown/internal/plugin"
 	"github.com/steveyegge/gastown/internal/style"
 	"github.com/steveyegge/gastown/internal/tmux"
-	"github.com/steveyegge/gastown/internal/util"
 	"github.com/steveyegge/gastown/internal/workspace"
 )
 
@@ -284,7 +282,7 @@ func init() {
 	// Health-check flags
 	dogHealthCheckCmd.Flags().BoolVar(&dogHealthJSON, "json", false, "Output as JSON")
 	dogHealthCheckCmd.Flags().BoolVar(&dogHealthAutoClear, "auto-clear", false, "Auto-clear zombie dogs")
-	dogHealthCheckCmd.Flags().DurationVar(&dogHealthMaxInactivity, "max-inactivity", 30*time.Minute, "Max inactivity before considering hung")
+	dogHealthCheckCmd.Flags().DurationVar(&dogHealthMaxInactivity, "max-inactivity", 10*time.Minute, "Max inactivity before considering hung")
 
 	// Add subcommands
 	dogCmd.AddCommand(dogAddCmd)
@@ -694,15 +692,20 @@ func runDogDone(cmd *cobra.Command, args []string) error {
 	t := tmux.NewTmux()
 	_ = t.SetRemainOnExit(sessionID, false)
 	fmt.Printf("  Session %s will terminate in 3s\n", sessionID)
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer cancel()
-	killCmd := exec.CommandContext(ctx, "bash", "-c",
-		fmt.Sprintf("sleep 3 && tmux kill-session -t '%s' 2>/dev/null", sessionID))
-	util.SetProcessGroup(killCmd)
-	if err := killCmd.Start(); err != nil {
-		// Non-fatal: session may not be tmux-based (e.g., manual testing).
-		fmt.Fprintf(os.Stderr, "warning: failed to schedule session termination: %v\n", err)
-	}
+
+	// Kill the tmux session after a short delay using a goroutine.
+	// Previous approach used bash -c "sleep 3 && tmux kill-session" which
+	// fails silently on Windows. The goroutine is cross-platform and uses
+	// the tmux package which handles the socket name automatically.
+	go func() {
+		time.Sleep(3 * time.Second)
+		if err := t.KillSession(sessionID); err != nil {
+			fmt.Fprintf(os.Stderr, "warning: failed to kill session %s: %v\n", sessionID, err)
+		}
+	}()
+
+	// Wait for the goroutine to finish (the process will exit after kill).
+	time.Sleep(4 * time.Second)
 
 	return nil
 }

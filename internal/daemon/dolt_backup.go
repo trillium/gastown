@@ -6,10 +6,12 @@ import (
 	"os"
 	"os/exec"
 	"path/filepath"
+	"runtime"
 	"strings"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/constants"
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
@@ -32,7 +34,12 @@ func doltBackupInterval(config *DaemonPatrolConfig) time.Duration {
 // syncDoltBackups syncs each production database to its configured backup location.
 // Non-fatal: errors are logged but don't stop the daemon.
 func (d *Daemon) syncDoltBackups() {
-	if !IsPatrolEnabled(d.patrolConfig, "dolt_backup") {
+	// Dolt backup uses iCloud Drive for offsite sync — only available on macOS.
+	// On Linux this generates HIGH priority escalation spam every ~15 minutes.
+	if runtime.GOOS != "darwin" {
+		return
+	}
+	if !d.isPatrolActive("dolt_backup") {
 		return
 	}
 
@@ -107,6 +114,7 @@ func (d *Daemon) syncBackup(dataDir, db, backupName string) error {
 	dbDir := dataDir + "/" + db
 	cmd := exec.CommandContext(ctx, "dolt", "backup", "sync", backupName)
 	cmd.Dir = dbDir
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.CombinedOutput()
 	if err != nil {
@@ -141,6 +149,7 @@ func (d *Daemon) syncOffsiteBackup() {
 	defer cancel()
 
 	cmd := exec.CommandContext(ctx, "rsync", "-a", "--delete", backupDir+"/", icloudDir+"/")
+	util.SetDetachedProcessGroup(cmd)
 	if output, err := cmd.CombinedOutput(); err != nil {
 		d.logger.Printf("dolt_backup: offsite sync failed: %v (%s)", err, strings.TrimSpace(string(output)))
 	} else {
@@ -184,6 +193,7 @@ func (d *Daemon) hasBackupRemote(dataDir, db, backupName string) bool {
 	dbDir := dataDir + "/" + db
 	cmd := exec.CommandContext(ctx, "dolt", "backup")
 	cmd.Dir = dbDir
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {

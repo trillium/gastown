@@ -35,14 +35,16 @@ type HealthReport struct {
 }
 
 type ServerHealth struct {
-	Running        bool          `json:"running"`
-	PID            int           `json:"pid,omitempty"`
-	Port           int           `json:"port,omitempty"`
-	LatencyMs      int64         `json:"latency_ms,omitempty"`
-	Connections    int           `json:"connections,omitempty"`
-	MaxConnections int           `json:"max_connections,omitempty"`
-	DiskUsageBytes int64         `json:"disk_usage_bytes,omitempty"`
-	DiskUsageHuman string        `json:"disk_usage_human,omitempty"`
+	Running            bool    `json:"running"`
+	PID                int     `json:"pid,omitempty"`
+	Port               int     `json:"port,omitempty"`
+	LatencyMs          int64   `json:"latency_ms,omitempty"`
+	Connections        int     `json:"connections,omitempty"`
+	MaxConnections     int     `json:"max_connections,omitempty"`
+	DiskUsageBytes     int64   `json:"disk_usage_bytes,omitempty"`
+	DiskUsageHuman     string  `json:"disk_usage_human,omitempty"`
+	LastCommitAgeSec   float64 `json:"last_commit_age_seconds,omitempty"`
+	LastCommitDB       string  `json:"last_commit_db,omitempty"`
 }
 
 type DatabaseHealth struct {
@@ -167,12 +169,16 @@ func checkServerHealth(townRoot string) *ServerHealth {
 	sh.MaxConnections = metrics.MaxConnections
 	sh.DiskUsageBytes = metrics.DiskUsageBytes
 	sh.DiskUsageHuman = metrics.DiskUsageHuman
+	if metrics.LastCommitAge > 0 {
+		sh.LastCommitAgeSec = metrics.LastCommitAge.Seconds()
+		sh.LastCommitDB = metrics.LastCommitDB
+	}
 
 	return sh
 }
 
 func checkDatabaseHealth(port int) []DatabaseHealth {
-	productionDBs := []string{"hq", "bd", "gt"}
+	productionDBs := []string{"hq", "gt", "mo"}
 	var results []DatabaseHealth
 
 	for _, dbName := range productionDBs {
@@ -208,7 +214,7 @@ func checkDatabaseHealth(port int) []DatabaseHealth {
 }
 
 func checkPollution(port int) []PollutionRecord {
-	productionDBs := []string{"hq", "bd", "gt"}
+	productionDBs := []string{"hq", "gt", "mo"}
 	var records []PollutionRecord
 
 	// Known pollution patterns to check in the issues table.

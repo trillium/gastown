@@ -10,6 +10,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"runtime"
 	"strings"
 )
 
@@ -169,10 +170,11 @@ func HooksEqual(a, b *HooksConfig) bool {
 
 // Target represents a managed settings.json location.
 type Target struct {
-	Path string // Full path to .claude/settings.json
-	Key  string // Override key: "gastown/crew", "mayor", etc.
-	Rig  string // Rig name or empty for town-level
-	Role string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, witness, refinery, polecat, mayor, deacon.
+	Path     string // Full path to .claude/settings.json or .gemini/settings.json
+	Key      string // Override key: "gastown/crew", "mayor", etc.
+	Rig      string // Rig name or empty for town-level
+	Role     string // Informational only — does NOT participate in override resolution (Key does). Singular form matching RoleSettingsDir: crew, witness, refinery, polecat, mayor, deacon.
+	Provider string // Hook provider: "claude" (default/empty) or "gemini", etc.
 }
 
 // DisplayKey returns a human-readable label for the target.
@@ -203,7 +205,7 @@ func Merge(base, override *HooksConfig) *HooksConfig {
 // context (which degrades quality), the session is replaced with a fresh one.
 // The successor picks up hooked work via SessionStart hook (gt prime --hook).
 func DefaultOverrides() map[string]*HooksConfig {
-	pathSetup := `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"`
+	pathSetup := pathSetupCmd()
 
 	return map[string]*HooksConfig{
 		// Polecats: auto-run gt done on session Stop (gas-lob).
@@ -218,7 +220,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 					Hooks: []Hook{
 						{
 							Type:    "command",
-							Command: fmt.Sprintf("%s && gt tap polecat-stop-check", pathSetup),
+							Command: hookChain(pathSetup, "gt tap polecat-stop-check"),
 						},
 					},
 				},
@@ -235,7 +237,7 @@ func DefaultOverrides() map[string]*HooksConfig {
 					Hooks: []Hook{
 						{
 							Type:    "command",
-							Command: fmt.Sprintf("%s && gt handoff --cycle --reason compaction", pathSetup),
+							Command: hookChain(pathSetup, "gt handoff --cycle --reason compaction"),
 						},
 					},
 				},
@@ -481,9 +483,89 @@ func DiscoverTargets(townRoot string) ([]Target, error) {
 				Role: "refinery",
 			})
 		}
+
 	}
 
 	return targets, nil
+}
+
+
+// RoleLocation represents a discovered role directory in the workspace,
+// independent of any specific agent. Used by callers that need to resolve
+// agent configuration for each location (e.g., syncing non-Claude agents).
+type RoleLocation struct {
+	Dir  string // Absolute path to the role's parent directory (e.g., .../rig/crew)
+	Rig  string // Rig name, or empty for town-level roles
+	Role string // Role name: crew, polecat, witness, refinery, mayor, deacon
+}
+
+// DiscoverRoleLocations finds all role directories in a workspace.
+// Unlike DiscoverTargets (which returns Claude-specific paths), this returns
+// agent-agnostic directory locations that callers can use with any agent config.
+func DiscoverRoleLocations(townRoot string) ([]RoleLocation, error) {
+	var locations []RoleLocation
+
+	// Town-level roles
+	for _, role := range []string{"mayor", "deacon"} {
+		dir := filepath.Join(townRoot, role)
+		if info, err := os.Stat(dir); err == nil && info.IsDir() {
+			locations = append(locations, RoleLocation{Dir: dir, Role: role})
+		}
+	}
+
+	// Scan rigs
+	entries, err := os.ReadDir(townRoot)
+	if err != nil {
+		return nil, err
+	}
+
+	for _, entry := range entries {
+		if !entry.IsDir() || entry.Name() == "mayor" || entry.Name() == "deacon" ||
+			entry.Name() == ".beads" || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+
+		rigName := entry.Name()
+		rigPath := filepath.Join(townRoot, rigName)
+
+		if !isRig(rigPath) {
+			continue
+		}
+
+		// Map subdirectories to roles
+		for _, sub := range []struct{ dir, role string }{
+			{"crew", "crew"},
+			{"polecats", "polecat"},
+			{"witness", "witness"},
+			{"refinery", "refinery"},
+		} {
+			dir := filepath.Join(rigPath, sub.dir)
+			if info, err := os.Stat(dir); err == nil && info.IsDir() {
+				locations = append(locations, RoleLocation{Dir: dir, Rig: rigName, Role: sub.role})
+			}
+		}
+	}
+
+	return locations, nil
+}
+
+// DiscoverWorktrees returns subdirectories within a role parent directory that
+// are individual worktrees (e.g., crew/alice, crew/bob, polecats/toast).
+// Skips hidden directories and non-directories.
+func DiscoverWorktrees(roleDir string) []string {
+	entries, err := os.ReadDir(roleDir)
+	if err != nil {
+		return nil
+	}
+
+	var dirs []string
+	for _, entry := range entries {
+		if !entry.IsDir() || strings.HasPrefix(entry.Name(), ".") {
+			continue
+		}
+		dirs = append(dirs, filepath.Join(roleDir, entry.Name()))
+	}
+	return dirs
 }
 
 // isRig checks if a directory looks like a rig (has crew/, witness/, or polecats/ subdirectory).
@@ -729,7 +811,7 @@ func ValidTarget(target string) bool {
 // DefaultBase returns a sensible default base configuration.
 // This includes PATH setup and gt prime hooks that all agents need.
 func DefaultBase() *HooksConfig {
-	pathSetup := `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"`
+	pathSetup := pathSetupCmd()
 
 	return &HooksConfig{
 		PreToolUse: []HookEntry{
@@ -737,42 +819,42 @@ func DefaultBase() *HooksConfig {
 				Matcher: "Bash(gh pr create*)",
 				Hooks: []Hook{{
 					Type:    "command",
-					Command: fmt.Sprintf("%s && gt tap guard pr-workflow", pathSetup),
+					Command: hookChain(pathSetup, "gt tap guard pr-workflow"),
 				}},
 			},
 			{
 				Matcher: "Bash(git checkout -b*)",
 				Hooks: []Hook{{
 					Type:    "command",
-					Command: fmt.Sprintf("%s && gt tap guard pr-workflow", pathSetup),
+					Command: hookChain(pathSetup, "gt tap guard pr-workflow"),
 				}},
 			},
 			{
 				Matcher: "Bash(git switch -c*)",
 				Hooks: []Hook{{
 					Type:    "command",
-					Command: fmt.Sprintf("%s && gt tap guard pr-workflow", pathSetup),
+					Command: hookChain(pathSetup, "gt tap guard pr-workflow"),
 				}},
 			},
 			{
 				Matcher: "Bash(rm -rf /*)",
 				Hooks: []Hook{{
 					Type:    "command",
-					Command: fmt.Sprintf("%s && gt tap guard dangerous-command", pathSetup),
+					Command: hookChain(pathSetup, "gt tap guard dangerous-command"),
 				}},
 			},
 			{
 				Matcher: "Bash(git push --force*)",
 				Hooks: []Hook{{
 					Type:    "command",
-					Command: fmt.Sprintf("%s && gt tap guard dangerous-command", pathSetup),
+					Command: hookChain(pathSetup, "gt tap guard dangerous-command"),
 				}},
 			},
 			{
 				Matcher: "Bash(git push -f*)",
 				Hooks: []Hook{{
 					Type:    "command",
-					Command: fmt.Sprintf("%s && gt tap guard dangerous-command", pathSetup),
+					Command: hookChain(pathSetup, "gt tap guard dangerous-command"),
 				}},
 			},
 		},
@@ -782,7 +864,7 @@ func DefaultBase() *HooksConfig {
 				Hooks: []Hook{
 					{
 						Type:    "command",
-						Command: fmt.Sprintf("%s && gt prime --hook", pathSetup),
+						Command: hookChain(pathSetup, "gt prime --hook"),
 					},
 				},
 			},
@@ -793,7 +875,7 @@ func DefaultBase() *HooksConfig {
 				Hooks: []Hook{
 					{
 						Type:    "command",
-						Command: fmt.Sprintf("%s && gt prime --hook", pathSetup),
+						Command: hookChain(pathSetup, "gt prime --hook"),
 					},
 				},
 			},
@@ -804,7 +886,7 @@ func DefaultBase() *HooksConfig {
 				Hooks: []Hook{
 					{
 						Type:    "command",
-						Command: fmt.Sprintf("%s && gt mail check --inject", pathSetup),
+						Command: hookChain(pathSetup, "gt mail check --inject"),
 					},
 				},
 			},
@@ -815,7 +897,7 @@ func DefaultBase() *HooksConfig {
 				Hooks: []Hook{
 					{
 						Type:    "command",
-						Command: fmt.Sprintf("%s && gt costs record &", pathSetup),
+						Command: hookChain(pathSetup, "gt costs record &"),
 					},
 				},
 			},
@@ -891,4 +973,25 @@ func saveConfig(path string, cfg *HooksConfig) error {
 	}
 
 	return nil
+}
+
+// pathSetupCmd returns an OS-appropriate command to add Go and local bin
+// directories to PATH. On Unix this is a bash export; on Windows it
+// prepends to $env:PATH for PowerShell.
+func pathSetupCmd() string {
+	if runtime.GOOS == "windows" {
+		home := os.Getenv("USERPROFILE")
+		return fmt.Sprintf(`$env:PATH="%s\go\bin;%s\.local\bin;$env:PATH"`, home, home)
+	}
+	return `export PATH="$HOME/go/bin:$HOME/.local/bin:$PATH"`
+}
+
+// hookChain joins a path setup command with a gt command using an
+// OS-appropriate separator (&& for bash, ; for PowerShell).
+func hookChain(parts ...string) string {
+	sep := " && "
+	if runtime.GOOS == "windows" {
+		sep = "; "
+	}
+	return strings.Join(parts, sep)
 }

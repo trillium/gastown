@@ -350,6 +350,7 @@ func init() {
 	rigCmd.AddCommand(rigRestartCmd)
 	rigCmd.AddCommand(rigShutdownCmd)
 	rigCmd.AddCommand(rigStartCmd)
+	rigCmd.AddCommand(rigMenuCmd)
 	rigCmd.AddCommand(rigStatusCmd)
 	rigCmd.AddCommand(rigStopCmd)
 
@@ -489,7 +490,7 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 	gitURL := args[1]
 
 	if !isGitRemoteURL(gitURL) {
-		return fmt.Errorf("invalid git URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://)\n\nTo register a local directory, use:\n  gt rig add %s --adopt", gitURL, name)
+		return fmt.Errorf("invalid git URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://, file:///abs/path)\n\nTo use a local repo as the source, pass a file:// URL. To register an already-assembled rig directory, use:\n  gt rig add %s --adopt", gitURL, name)
 	}
 
 	// Ensure beads (bd) is available before proceeding
@@ -605,10 +606,12 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 			State:  beads.RigStateActive,
 		}
 		if _, err := bd.CreateRigBead(name, fields); err != nil {
-			return fmt.Errorf("creating rig identity bead: %w\n\nRun 'gt upgrade' to repair missing identity beads", err)
+			// Non-fatal: rig is functional without the identity bead
+			fmt.Printf("  %s Could not create rig identity bead: %v\n", style.Warning.Render("!"), err)
+		} else {
+			rigBeadID := beads.RigBeadIDWithPrefix(newRig.Config.Prefix, name)
+			fmt.Printf("  Created rig identity bead: %s\n", rigBeadID)
 		}
-		rigBeadID := beads.RigBeadIDWithPrefix(newRig.Config.Prefix, name)
-		fmt.Printf("  Created rig identity bead: %s\n", rigBeadID)
 
 		// Create agent beads for the rig (witness, refinery)
 		// This ensures they exist before the daemon tries to start them
@@ -618,18 +621,20 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 			fmt.Sprintf("Witness for %s - monitors polecat health and progress.", name),
 			&beads.AgentFields{RoleType: "witness", Rig: name, AgentState: "idle"},
 		); err != nil {
-			return fmt.Errorf("creating witness identity bead: %w\n\nRun 'gt upgrade' to repair missing identity beads", err)
+			fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
+		} else {
+			fmt.Printf("  Created agent bead: %s\n", witnessID)
 		}
-		fmt.Printf("  Created agent bead: %s\n", witnessID)
 
 		refineryID := beads.RefineryBeadIDWithPrefix(prefix, name)
 		if _, err := bd.CreateAgentBead(refineryID,
 			fmt.Sprintf("Refinery for %s - processes merge queue.", name),
 			&beads.AgentFields{RoleType: "refinery", Rig: name, AgentState: "idle"},
 		); err != nil {
-			return fmt.Errorf("creating refinery identity bead: %w\n\nRun 'gt upgrade' to repair missing identity beads", err)
+			fmt.Printf("  %s Could not create refinery agent bead: %v\n", style.Warning.Render("!"), err)
+		} else {
+			fmt.Printf("  Created agent bead: %s\n", refineryID)
 		}
-		fmt.Printf("  Created agent bead: %s\n", refineryID)
 	}
 
 	// Auto-assign a namepool theme that doesn't collide with other rigs (gas-21k).
@@ -686,20 +691,23 @@ func runRigAdd(cmd *cobra.Command, args []string) error {
 //   - 🅿️ = parked (intentionally paused)
 //   - 🛑 = docked (global shutdown)
 func GetRigLED(hasWitness, hasRefinery bool, opState string) string {
+	// Check operational state FIRST — parked/docked overrides session state.
+	// Sessions may still be running during the race window after park/dock
+	// but before sessions are killed (GH#2555).
+	switch opState {
+	case "PARKED":
+		return "🅿️"
+	case "DOCKED":
+		return "🛑"
+	}
+
 	if hasWitness && hasRefinery {
 		return "🟢"
 	}
 	if hasWitness || hasRefinery {
 		return "🟡"
 	}
-	switch opState {
-	case "PARKED":
-		return "🅿️"
-	case "DOCKED":
-		return "🛑"
-	default:
-		return "⚫"
-	}
+	return "⚫"
 }
 
 // rigStatePriority returns a sort priority for a rig's state.
@@ -845,6 +853,129 @@ func runRigList(cmd *cobra.Command, args []string) error {
 	}
 
 	return nil
+}
+
+var rigMenuCmd = &cobra.Command{
+	Use:    "menu",
+	Short:  "Show interactive rig menu in tmux",
+	Long:   `Display a tmux popup menu listing all rigs with status indicators and per-rig actions.`,
+	Hidden: true, // Internal command called by keybinding
+	RunE:   runRigMenu,
+}
+
+func runRigMenu(cmd *cobra.Command, args []string) error {
+	townRoot, err := workspace.FindFromCwdOrError()
+	if err != nil {
+		return fmt.Errorf("not in a Gas Town workspace: %w", err)
+	}
+
+	rigsPath := filepath.Join(townRoot, "mayor", "rigs.json")
+	rigsConfig, err := config.LoadRigsConfig(rigsPath)
+	if err != nil || len(rigsConfig.Rigs) == 0 {
+		return fmt.Errorf("no rigs configured")
+	}
+
+	t := tmux.NewTmux()
+
+	type menuRig struct {
+		name     string
+		led      string
+		running  bool
+		opState  string
+		sortPrio int
+	}
+
+	var rigs []menuRig
+	for name := range rigsConfig.Rigs {
+		prefix := session.PrefixFor(name)
+		opState, _ := getRigOperationalState(townRoot, name)
+
+		witnessSession := session.WitnessSessionName(prefix)
+		refinerySession := session.RefinerySessionName(prefix)
+		hasWitness, _ := t.HasSession(witnessSession)
+		hasRefinery, _ := t.HasSession(refinerySession)
+
+		led := GetRigLED(hasWitness, hasRefinery, opState)
+		rigs = append(rigs, menuRig{
+			name:     name,
+			led:      led,
+			running:  hasWitness || hasRefinery,
+			opState:  opState,
+			sortPrio: rigStatePriority(hasWitness, hasRefinery, opState),
+		})
+	}
+
+	sort.Slice(rigs, func(i, j int) bool {
+		if rigs[i].sortPrio != rigs[j].sortPrio {
+			return rigs[i].sortPrio < rigs[j].sortPrio
+		}
+		return rigs[i].name < rigs[j].name
+	})
+
+	menuArgs := []string{
+		"display-menu",
+		"-T", "#[align=centre,fg=cyan,bold]⛽ Rigs", //nolint:misspell // tmux uses British spelling
+		"-x", "C",
+		"-y", "C",
+		"--",
+	}
+
+	keyIndex := 0
+	for _, r := range rigs {
+		// Rig name entry — opens status popup
+		space := " "
+		if r.led == "🅿️" {
+			space = "  "
+		}
+		label := fmt.Sprintf("%s%s%s", r.led, space, r.name)
+		key := shortcutKey(keyIndex)
+		action := fmt.Sprintf("display-popup -E -w 80 -h 25 -T ' %s ' 'gt rig status %s; echo; echo \"Press any key to close\"; read -rsn1'", r.name, r.name)
+		menuArgs = append(menuArgs, label, key, action)
+		keyIndex++
+
+		// Contextual actions (no shortcut keys)
+		if r.running {
+			menuArgs = append(menuArgs,
+				"   Stop", "", fmt.Sprintf("run-shell 'gt rig stop %s'", r.name),
+				"   Reboot", "", fmt.Sprintf("run-shell 'gt rig reboot %s'", r.name),
+			)
+		} else if r.opState == "PARKED" {
+			menuArgs = append(menuArgs,
+				"   Unpark", "", fmt.Sprintf("run-shell 'gt rig unpark %s'", r.name),
+				"   Start", "", fmt.Sprintf("run-shell 'gt rig start %s'", r.name),
+			)
+		} else if r.opState == "DOCKED" {
+			menuArgs = append(menuArgs,
+				"   Undock", "", fmt.Sprintf("run-shell 'gt rig undock %s'", r.name),
+			)
+		} else {
+			// Stopped but not parked/docked
+			menuArgs = append(menuArgs,
+				"   Start", "", fmt.Sprintf("run-shell 'gt rig start %s'", r.name),
+			)
+		}
+
+		// Park/dock available for non-parked/docked rigs
+		if r.opState != "PARKED" && r.opState != "DOCKED" {
+			menuArgs = append(menuArgs,
+				"   Park", "", fmt.Sprintf("run-shell 'gt rig park %s'", r.name),
+			)
+		}
+
+		// Separator between rigs
+		menuArgs = append(menuArgs, "")
+	}
+
+	tmuxPath, err := exec.LookPath("tmux")
+	if err != nil {
+		return fmt.Errorf("tmux not found: %w", err)
+	}
+
+	execCmd := exec.Command(tmuxPath, menuArgs...)
+	execCmd.Stdin = os.Stdin
+	execCmd.Stdout = os.Stdout
+	execCmd.Stderr = os.Stderr
+	return execCmd.Run()
 }
 
 func runRigRemove(cmd *cobra.Command, args []string) error {
@@ -1003,19 +1134,19 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 
 	// Validate --url if provided
 	if rigAddAdoptURL != "" && !isGitRemoteURL(rigAddAdoptURL) {
-		return fmt.Errorf("invalid git URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://)", rigAddAdoptURL)
+		return fmt.Errorf("invalid git URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://, file:///abs/path)", rigAddAdoptURL)
 	}
 
 	// Validate --push-url if provided
 	rigAddPushURL = strings.TrimSpace(rigAddPushURL)
 	if rigAddPushURL != "" && !isGitRemoteURL(rigAddPushURL) {
-		return fmt.Errorf("invalid push URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://)", rigAddPushURL)
+		return fmt.Errorf("invalid push URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://, file:///abs/path)", rigAddPushURL)
 	}
 
 	// Validate --upstream-url if provided
 	rigAddUpstreamURL = strings.TrimSpace(rigAddUpstreamURL)
 	if rigAddUpstreamURL != "" && !isGitRemoteURL(rigAddUpstreamURL) {
-		return fmt.Errorf("invalid upstream URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://)", rigAddUpstreamURL)
+		return fmt.Errorf("invalid upstream URL %q: expected a remote URL (e.g. https://, git@host:, ssh://, s3://, file:///abs/path)", rigAddUpstreamURL)
 	}
 
 	// Register the existing rig
@@ -1100,7 +1231,7 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 					}
 				}
 				// Fallback: extract prefix from dolt_database name in metadata.json.
-				// Format: "beads_<prefix>" (e.g. "beads_my-project" → "my-project").
+				// Format: "beads_<prefix>" (e.g. "beads_my_project" → "my_project").
 				// This survives clone because metadata.json is tracked by git.
 				if !prefixDetected {
 					var fullMeta struct {
@@ -1193,9 +1324,10 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				State:  beads.RigStateActive,
 			}
 			if _, err := bd.CreateRigBead(name, fields); err != nil {
-				return fmt.Errorf("creating rig identity bead: %w\n\nRun 'gt upgrade' to repair missing identity beads", err)
+				fmt.Printf("  %s Could not create rig identity bead: %v\n", style.Warning.Render("!"), err)
+			} else {
+				fmt.Printf("  %s Created rig identity bead: %s\n", style.Success.Render("✓"), rigBeadID)
 			}
-			fmt.Printf("  %s Created rig identity bead: %s\n", style.Success.Render("✓"), rigBeadID)
 		}
 
 		// Create agent beads for the rig (witness, refinery)
@@ -1207,9 +1339,10 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				fmt.Sprintf("Witness for %s - monitors polecat health and progress.", name),
 				&beads.AgentFields{RoleType: "witness", Rig: name, AgentState: "idle"},
 			); err != nil {
-				return fmt.Errorf("creating witness identity bead: %w\n\nRun 'gt upgrade' to repair missing identity beads", err)
+				fmt.Printf("  %s Could not create witness agent bead: %v\n", style.Warning.Render("!"), err)
+			} else {
+				fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), witnessID)
 			}
-			fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), witnessID)
 		}
 
 		refineryID := beads.RefineryBeadIDWithPrefix(prefix, name)
@@ -1218,9 +1351,10 @@ func runRigAdopt(_ *cobra.Command, args []string) error {
 				fmt.Sprintf("Refinery for %s - processes merge queue.", name),
 				&beads.AgentFields{RoleType: "refinery", Rig: name, AgentState: "idle"},
 			); err != nil {
-				return fmt.Errorf("creating refinery identity bead: %w\n\nRun 'gt upgrade' to repair missing identity beads", err)
+				fmt.Printf("  %s Could not create refinery agent bead: %v\n", style.Warning.Render("!"), err)
+			} else {
+				fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), refineryID)
 			}
-			fmt.Printf("  %s Created agent bead: %s\n", style.Success.Render("✓"), refineryID)
 		}
 	}
 
@@ -1819,12 +1953,15 @@ func runRigStatus(cmd *cobra.Command, args []string) error {
 			// Reconcile display state with tmux session liveness.
 			// Per gt-zecmc design: tmux is ground truth for observable states.
 			// If session is running but beads says done, the polecat is still alive.
-			// If session is dead but beads says working, the polecat is actually done.
+			// If session is dead but beads says working, show "stalled" so the
+			// witness can detect unsubmitted work (gt-3071b). Previously this
+			// showed "done" which masked failures where polecats died before
+			// running gt done, leaving work stranded in worktrees.
 			displayState := p.State
 			if hasSession && displayState == polecat.StateDone {
 				displayState = polecat.StateWorking
 			} else if !hasSession && displayState == polecat.StateWorking {
-				displayState = polecat.StateDone
+				displayState = polecat.State("stalled")
 			}
 
 			stateStr := string(displayState)
@@ -2264,8 +2401,8 @@ func commitTownConfigChanges(townRoot, rigName string) {
 }
 
 // isGitRemoteURL returns true if s looks like a remote git URL rather than a
-// local path. Accepts any scheme:// URL (git delegates to git-remote-<scheme>
-// helpers, e.g. git-remote-s3 for s3:// URLs) as well as SCP-style SSH URLs.
+// local path. Accepts any scheme:// URL (including file:// for explicit local
+// mirrors) as well as SCP-style SSH URLs.
 func isGitRemoteURL(s string) bool {
 	// Reject flag-like strings (defense-in-depth against argument injection)
 	if strings.HasPrefix(s, "-") {
@@ -2287,12 +2424,8 @@ func isGitRemoteURL(s string) bool {
 	if strings.HasPrefix(s, "~/") {
 		return false
 	}
-	// Reject file:// URIs (local filesystem access)
-	if strings.HasPrefix(s, "file://") {
-		return false
-	}
 	// Accept any scheme:// URL where scheme is alphanumeric (plus + - .).
-	// This covers https://, ssh://, git://, s3://, codecommit://, etc.
+	// This covers https://, ssh://, git://, s3://, file://, codecommit://, etc.
 	// Git invokes git-remote-<scheme> for non-builtin schemes.
 	if idx := strings.Index(s, "://"); idx > 0 {
 		scheme := s[:idx]

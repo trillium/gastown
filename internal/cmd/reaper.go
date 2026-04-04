@@ -259,6 +259,10 @@ Returns the count of closed issues. Use --dry-run to preview.`,
 			if result.DryRun {
 				prefix = "[DRY RUN] would "
 			}
+			for _, entry := range result.ClosedEntries {
+				fmt.Printf("  %s %s (%dd stale, db:%s)\n",
+					entry.ID, entry.Title, entry.AgeDays, entry.Database)
+			}
 			fmt.Printf("%s: %sauto-closed %d stale issues\n",
 				result.Database, prefix, result.Closed)
 		}
@@ -354,6 +358,10 @@ Normally the daemon dispatches a Dog to execute the mol-dog-reaper formula.`,
 			if err != nil {
 				fmt.Printf("%s: auto-close error: %v\n", dbName, err)
 			} else {
+				for _, entry := range closeResult.ClosedEntries {
+					fmt.Printf("  %s %s (%dd stale, db:%s)\n",
+						entry.ID, entry.Title, entry.AgeDays, entry.Database)
+				}
 				totalClosed += closeResult.Closed
 			}
 

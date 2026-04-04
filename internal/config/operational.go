@@ -18,8 +18,8 @@ const (
 	DefaultBdSubprocessTimeout     = 5 * time.Second
 	DefaultGUPPViolationTimeout    = 30 * time.Minute
 	DefaultHungSessionThreshold    = 30 * time.Minute
-	DefaultStartupNudgeVerifyDelay = 5 * time.Second
-	DefaultStartupNudgeMaxRetries  = 3
+	DefaultStartupNudgeVerifyDelay = 25 * time.Second
+	DefaultStartupNudgeMaxRetries  = 2
 )
 
 // Nudge defaults.
@@ -63,7 +63,7 @@ const (
 	DefaultDeaconConsecutiveFailures       = 3
 	DefaultDeaconCooldown                  = 5 * time.Minute
 	DefaultDeaconHeartbeatStaleThreshold   = 5 * time.Minute
-	DefaultDeaconHeartbeatVeryStale        = 15 * time.Minute
+	DefaultDeaconHeartbeatVeryStale        = 20 * time.Minute
 	DefaultMaxRedispatches                 = 3
 	DefaultRedispatchCooldown              = 5 * time.Minute
 	DefaultMaxFeedsPerCycle                = 3

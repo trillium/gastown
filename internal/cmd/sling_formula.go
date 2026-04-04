@@ -178,6 +178,12 @@ func runSlingFormula(ctx context.Context, args []string) error {
 
 	// Step 3: Hook the wisp bead with retry and verification.
 	// See: https://github.com/steveyegge/gastown/issues/148
+	// Acquire per-assignee lock to serialize concurrent hook writes (issue #3114).
+	assigneeUnlock, assigneeLockErr := tryAcquireSlingAssigneeLock(townRoot, targetAgent)
+	if assigneeLockErr != nil {
+		return fmt.Errorf("serializing hook write for %s: %w", targetAgent, assigneeLockErr)
+	}
+	defer assigneeUnlock()
 	hookDir := beads.ResolveHookDir(townRoot, wispRootID, "")
 	if err := hookBeadWithRetry(wispRootID, targetAgent, hookDir); err != nil {
 		return err
@@ -258,6 +264,22 @@ func runSlingFormula(ctx context.Context, args []string) error {
 		prompt = fmt.Sprintf("Formula %s slung. Run `"+cli.Name()+" hook` to see your hook, then execute the steps.", formulaName)
 	}
 	t := tmux.NewTmux()
+
+	// Dog sessions need a nudge sent to their session (not to the bare pane ID
+	// from StartDelayedSession, which is ambiguous on platforms where tmux pane
+	// IDs are not globally unique). Use NudgeSession which qualifies the target
+	// with the session name.
+	if delayedDogInfo != nil {
+		dogSession := fmt.Sprintf("hq-dog-%s", delayedDogInfo.DogName)
+		if err := t.NudgeSession(dogSession, prompt); err != nil {
+			fmt.Printf("%s Could not nudge dog %s: %v (will discover work via gt prime)\n",
+				style.Dim.Render("○"), delayedDogInfo.DogName, err)
+		} else {
+			fmt.Printf("%s Nudged dog %s\n", style.Bold.Render("▶"), delayedDogInfo.DogName)
+		}
+		return nil
+	}
+
 	if err := t.NudgePane(targetPane, prompt); err != nil {
 		// Graceful fallback for no-tmux mode
 		fmt.Printf("%s Could not nudge (no tmux?): %v\n", style.Dim.Render("○"), err)

@@ -11,6 +11,7 @@ import (
 	"path/filepath"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	"github.com/steveyegge/gastown/internal/activity"
@@ -80,6 +81,51 @@ func (f *LiveConvoyFetcher) runBdCmd(beadsDir string, args ...string) (*bytes.Bu
 	return &stdout, nil
 }
 
+// fetchCircuitBreaker tracks consecutive failures for a fetch operation
+// and applies exponential backoff to prevent process storms.
+type fetchCircuitBreaker struct {
+	mu          sync.Mutex
+	failures    int
+	lastAttempt time.Time
+	backoff     time.Duration
+}
+
+// maxBackoff is the maximum backoff duration for the circuit breaker.
+const maxBackoff = 5 * time.Minute
+
+// allow returns true if enough time has passed since the last failure to permit
+// a new attempt. Always allows the first attempt (zero failures).
+func (cb *fetchCircuitBreaker) allow() bool {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	if cb.failures == 0 {
+		return true
+	}
+	return time.Since(cb.lastAttempt) >= cb.backoff
+}
+
+// recordFailure increments the failure count and sets exponential backoff.
+// Backoff doubles from 10s up to maxBackoff.
+func (cb *fetchCircuitBreaker) recordFailure() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures++
+	cb.lastAttempt = time.Now()
+	// Exponential backoff: 10s, 20s, 40s, 80s, 160s, capped at maxBackoff
+	cb.backoff = time.Duration(1<<min(cb.failures, 10)) * 5 * time.Second
+	if cb.backoff > maxBackoff {
+		cb.backoff = maxBackoff
+	}
+}
+
+// recordSuccess resets the circuit breaker on a successful fetch.
+func (cb *fetchCircuitBreaker) recordSuccess() {
+	cb.mu.Lock()
+	defer cb.mu.Unlock()
+	cb.failures = 0
+	cb.backoff = 0
+}
+
 // LiveConvoyFetcher fetches convoy data from beads.
 type LiveConvoyFetcher struct {
 	townRoot  string
@@ -87,6 +133,12 @@ type LiveConvoyFetcher struct {
 
 	// bdBin is the bd binary name or path. Defaults to "bd" if empty.
 	bdBin string
+
+	// registry is a prefix registry built from the town's rigs.json.
+	// Used for parsing tmux session names instead of relying on the
+	// package-level DefaultRegistry, which may not be initialized in
+	// the dashboard process context.
+	registry *session.PrefixRegistry
 
 	// Configurable timeouts (from TownSettings.WebTimeouts)
 	cmdTimeout     time.Duration
@@ -98,6 +150,10 @@ type LiveConvoyFetcher struct {
 	stuckThreshold          time.Duration
 	heartbeatFreshThreshold time.Duration
 	mayorActiveThreshold    time.Duration
+
+	// Circuit breaker for FetchConvoys — prevents process storms when
+	// bd list --type=convoy fails persistently (e.g., schema mismatch).
+	convoyBreaker fetchCircuitBreaker
 }
 
 // NewLiveConvoyFetcher creates a fetcher for the current workspace.
@@ -121,9 +177,19 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 		}
 	}
 
+	// Build a local prefix registry from the town's rigs.json so session
+	// name parsing works regardless of whether the package-level
+	// DefaultRegistry was initialized (gt-y24).
+	registry, regErr := session.BuildPrefixRegistryFromTown(townRoot)
+	if regErr != nil {
+		log.Printf("dashboard: failed to build prefix registry: %v (falling back to default)", regErr)
+		registry = session.DefaultRegistry()
+	}
+
 	return &LiveConvoyFetcher{
 		townRoot:                townRoot,
 		townBeads:               filepath.Join(townRoot, ".beads"),
+		registry:                registry,
 		cmdTimeout:              config.ParseDurationOrDefault(webCfg.CmdTimeout, 15*time.Second),
 		ghCmdTimeout:            config.ParseDurationOrDefault(webCfg.GhCmdTimeout, 10*time.Second),
 		tmuxCmdTimeout:          config.ParseDurationOrDefault(webCfg.TmuxCmdTimeout, 2*time.Second),
@@ -135,10 +201,17 @@ func NewLiveConvoyFetcher() (*LiveConvoyFetcher, error) {
 }
 
 // FetchConvoys fetches all open convoys with their activity data.
+// Uses a circuit breaker to avoid hammering bd/dolt when listing fails
+// persistently (e.g., "invalid issue type: convoy" schema mismatch).
 func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
+	if !f.convoyBreaker.allow() {
+		return nil, nil // Backed off — return empty result silently
+	}
+
 	// List all open convoy issues
 	stdout, err := f.runBdCmd(f.townRoot, "list", "--type=convoy", "--status=open", "--json")
 	if err != nil {
+		f.convoyBreaker.recordFailure()
 		return nil, fmt.Errorf("listing convoys: %w", err)
 	}
 
@@ -254,6 +327,7 @@ func (f *LiveConvoyFetcher) FetchConvoys() ([]ConvoyRow, error) {
 		rows = append(rows, row)
 	}
 
+	f.convoyBreaker.recordSuccess()
 	return rows, nil
 }
 
@@ -485,8 +559,10 @@ func (f *LiveConvoyFetcher) getAllPolecatActivity() *time.Time {
 		}
 
 		sessionName := parts[0]
-		// Check if it's a polecat or crew session (skip infrastructure roles)
-		identity, err := session.ParseSessionName(sessionName)
+		// Check if it's a polecat or crew session (skip infrastructure roles).
+		// Use the fetcher's own registry to avoid dependency on global
+		// DefaultRegistry initialization (gt-y24).
+		identity, err := session.ParseSessionNameWithRegistry(sessionName, f.registry)
 		if err != nil {
 			continue
 		}
@@ -749,10 +825,11 @@ func (f *LiveConvoyFetcher) FetchWorkers() ([]WorkerRow, error) {
 
 		sessionName := parts[0]
 
-		// Filter for gt-<rig>-<polecat> pattern
-		// Parse session name using canonical parser
-		identity, err := session.ParseSessionName(sessionName)
+		// Parse session name using the fetcher's own registry to avoid
+		// dependency on global DefaultRegistry initialization (gt-y24).
+		identity, err := session.ParseSessionNameWithRegistry(sessionName, f.registry)
 		if err != nil {
+			log.Printf("dashboard: FetchWorkers: skipping session %q: %v", sessionName, err)
 			continue
 		}
 
@@ -1379,8 +1456,8 @@ func (f *LiveConvoyFetcher) FetchSessions() ([]SessionRow, error) {
 			}
 		}
 
-		// Detect role from session name using canonical parser
-		if identity, err := session.ParseSessionName(name); err == nil {
+		// Detect role from session name using fetcher's own registry (gt-y24)
+		if identity, err := session.ParseSessionNameWithRegistry(name, f.registry); err == nil {
 			row.Rig = identity.Rig
 			row.Role = string(identity.Role)
 			row.Worker = identity.Name

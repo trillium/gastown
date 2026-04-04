@@ -9,6 +9,8 @@ import (
 	"path/filepath"
 	"strings"
 	"time"
+
+	"github.com/steveyegge/gastown/internal/util"
 )
 
 const (
@@ -29,7 +31,7 @@ func doltRemotesInterval(config *DaemonPatrolConfig) time.Duration {
 // pushDoltRemotes commits and pushes each configured database to its remote.
 // Non-fatal: errors are logged but don't stop the patrol.
 func (d *Daemon) pushDoltRemotes() {
-	if !IsPatrolEnabled(d.patrolConfig, "dolt_remotes") {
+	if !d.isPatrolActive("dolt_remotes") {
 		return
 	}
 
@@ -118,14 +120,15 @@ func (d *Daemon) pushDatabase(dataDir, db, remote, branch string) error {
 		d.logger.Printf("dolt_remotes: %s: add (non-fatal): %v", db, err)
 	}
 
-	// Step 2: Commit pending changes (non-fatal if nothing to commit)
-	commitQuery := fmt.Sprintf(
-		"USE `%s`; CALL DOLT_COMMIT('-m', 'daemon: auto-commit pending changes', '--author', 'Gas Town Daemon <daemon@gastown.local>')",
-		db,
-	)
-	if err := d.runDoltSQL(dataDir, commitQuery); err != nil {
-		errStr := err.Error()
-		if !strings.Contains(errStr, "nothing to commit") {
+	// Step 2: Commit staged changes only if dolt_status shows pending work.
+	// Skipping DOLT_COMMIT when nothing is staged avoids "nothing to commit"
+	// warnings in dolt.log, which were causing log bloat at ~3/sec (gt-zb8).
+	if d.hasStagedChanges(dataDir, db) {
+		commitQuery := fmt.Sprintf(
+			"USE `%s`; CALL DOLT_COMMIT('-m', 'daemon: auto-commit pending changes', '--author', 'Gas Town Daemon <daemon@gastown.local>')",
+			db,
+		)
+		if err := d.runDoltSQL(dataDir, commitQuery); err != nil {
 			d.logger.Printf("dolt_remotes: %s: commit (non-fatal): %v", db, err)
 		}
 	}
@@ -147,6 +150,7 @@ func (d *Daemon) runDoltSQL(dataDir, query string) error {
 
 	cmd := exec.CommandContext(ctx, "dolt", "sql", "-q", query)
 	cmd.Dir = dataDir
+	util.SetDetachedProcessGroup(cmd)
 
 	var stderr bytes.Buffer
 	cmd.Stderr = &stderr
@@ -160,6 +164,31 @@ func (d *Daemon) runDoltSQL(dataDir, query string) error {
 	}
 
 	return nil
+}
+
+// hasStagedChanges returns true if the database has staged changes in dolt_status.
+// Uses dolt_status WHERE staged=1. Fails open (returns true) on query errors so
+// that a DOLT_COMMIT attempt is still made and the error is surfaced normally.
+func (d *Daemon) hasStagedChanges(dataDir, db string) bool {
+	ctx, cancel := context.WithTimeout(context.Background(), doltPushTimeout)
+	defer cancel()
+
+	query := fmt.Sprintf("USE `%s`; SELECT COUNT(*) FROM dolt_status WHERE staged = 1", db)
+	cmd := exec.CommandContext(ctx, "dolt", "sql", "-r", "csv", "-q", query)
+	cmd.Dir = dataDir
+	util.SetDetachedProcessGroup(cmd)
+
+	output, err := cmd.Output()
+	if err != nil {
+		// Fail open: if we can't check, attempt the commit and let it fail naturally.
+		return true
+	}
+
+	lines := strings.Split(strings.TrimSpace(string(output)), "\n")
+	if len(lines) < 2 {
+		return false
+	}
+	return strings.TrimSpace(lines[1]) != "0"
 }
 
 // discoverDatabasesWithRemotes lists databases in the data directory
@@ -194,14 +223,21 @@ func (d *Daemon) discoverDatabasesWithRemotes(dataDir, remote string) ([]string,
 	return databases, nil
 }
 
+// escapeSQL escapes single quotes and backslashes for safe SQL string interpolation.
+func escapeSQL(s string) string {
+	s = strings.ReplaceAll(s, `\`, `\\`)
+	return strings.ReplaceAll(s, "'", "''")
+}
+
 // databaseHasRemote checks if a database has the specified remote configured.
 func (d *Daemon) databaseHasRemote(dataDir, db, remote string) bool {
 	ctx, cancel := context.WithTimeout(context.Background(), doltCmdTimeout)
 	defer cancel()
 
-	query := fmt.Sprintf("USE `%s`; SELECT name FROM dolt_remotes WHERE name = '%s'", db, remote)
+	query := fmt.Sprintf("USE `%s`; SELECT name FROM dolt_remotes WHERE name = '%s'", db, escapeSQL(remote))
 	cmd := exec.CommandContext(ctx, "dolt", "sql", "-r", "csv", "-q", query)
 	cmd.Dir = dataDir
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -221,6 +257,7 @@ func (d *Daemon) databaseHasAnyRemote(dataDir, db string) bool {
 	query := fmt.Sprintf("USE `%s`; SELECT name FROM dolt_remotes LIMIT 1", db)
 	cmd := exec.CommandContext(ctx, "dolt", "sql", "-r", "csv", "-q", query)
 	cmd.Dir = dataDir
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
@@ -240,6 +277,7 @@ func (d *Daemon) findDatabaseRemote(dataDir, db string) string {
 	query := fmt.Sprintf("USE `%s`; SELECT name FROM dolt_remotes LIMIT 1", db)
 	cmd := exec.CommandContext(ctx, "dolt", "sql", "-r", "csv", "-q", query)
 	cmd.Dir = dataDir
+	util.SetDetachedProcessGroup(cmd)
 
 	output, err := cmd.Output()
 	if err != nil {
