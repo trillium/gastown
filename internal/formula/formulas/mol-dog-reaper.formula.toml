@@ -215,7 +215,7 @@ default = ""
 
 [vars.dolt_host]
 description = "Dolt server host (env: GT_DOLT_HOST)"
-default = "100.111.197.110"
+default = "192.168.86.29"
 
 [vars.dolt_port]
 description = "Dolt server port"

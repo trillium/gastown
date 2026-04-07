@@ -45,7 +45,7 @@ translates its variables to bd's equivalents when spawning agents.
 | `GT_DOLT_PORT` | `BEADS_DOLT_PORT` | Server port (default: `3307`) |
 
 **Remote Dolt servers**: If Dolt runs on a different machine (e.g., over
-Tailscale), set `GT_DOLT_HOST` in the environment. gt propagates this as
+LAN), set `GT_DOLT_HOST` in the environment. gt propagates this as
 `BEADS_DOLT_SERVER_HOST` to all bd subprocesses, overriding bd's hardcoded
 `127.0.0.1` default. Without this, every new rig/worktree/polecat silently
 connects to localhost and fails.
@@ -88,8 +88,8 @@ automatically fails over to the next reachable host in `fallback_hosts`.
   "port": 3307,
   "external": true,
   "fallback_hosts": [
+    "192.168.86.29:3307",
     "100.111.197.110:3307",
-    "100.86.9.58:3307",
     "127.0.0.1:3307"
   ]
 }
