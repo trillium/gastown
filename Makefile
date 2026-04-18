@@ -11,7 +11,7 @@ E2E_BUILD_RETRIES ?= 1
 E2E_RUN_RETRIES ?= 1
 
 # Get version info for ldflags
-VERSION := $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")
+VERSION := $(shell base=$$(git describe --tags --match 'v*' --abbrev=0 2>/dev/null | sed 's/^v//' || echo "dev"); echo "$${base}.trillium")
 COMMIT := $(shell git rev-parse --short HEAD 2>/dev/null || echo "unknown")
 BUILD_TIME := $(shell date -u +"%Y-%m-%dT%H:%M:%SZ")
 
@@ -203,8 +203,7 @@ machines = d.get("machines", {}); \
 			if [ ! -e $$d/$(BINARY) ] || [ -L $$d/$(BINARY) ]; then \
 				ln -sf $$d/$(BINARY)-proxy-client $$d/$(BINARY); \
 			fi; \
-			echo \"    gt.real: \$$($$d/$(BINARY).real version 2>&1)\"; \
-			echo \"    gt:      \$$($$d/$(BINARY) version 2>&1)\"" || \
+			echo \"    gt.real: \$$($$d/$(BINARY).real version 2>&1)\"" || \
 		echo "    ✗ FAILED ($$alias)"; \
 	done < /tmp/_gt_dist_machines
 	@rm -f /tmp/_gt_dist_machines
